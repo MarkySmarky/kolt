@@ -4983,6 +4983,340 @@ enum SidebarPullRequestChecksStatus: String {
     case pending
 }
 
+// MARK: - CI Status Polling
+
+/// Polls GitHub Actions CI status for a given branch via the `gh` CLI.
+///
+/// All published state lives on `@MainActor`. The `gh` CLI process is spawned
+/// on a dedicated background queue to avoid blocking the main thread.
+@MainActor
+final class CIStatusPoller: ObservableObject {
+
+    // MARK: - Types
+
+    enum CIStatus: String, Codable {
+        case passing
+        case failing
+        case running
+        case none
+        case unknown
+    }
+
+    struct CIRunInfo: Codable, Equatable {
+        let status: String
+        let conclusion: String?
+        let name: String
+        let workflowName: String
+        let url: String
+    }
+
+    // MARK: - Published State
+
+    @Published private(set) var status: CIStatus = .unknown
+    @Published private(set) var runs: [CIRunInfo] = []
+    @Published private(set) var latestRunURL: String?
+
+    // MARK: - Configuration
+
+    nonisolated static let pollInterval: TimeInterval = 60
+
+    // MARK: - Private State
+
+    private var branch: String?
+    /// Timer is accessed from `deinit` and `stopTimer()` which may be nonisolated.
+    /// `DispatchSourceTimer.cancel()` is thread-safe.
+    nonisolated(unsafe) private var timer: DispatchSourceTimer?
+    private var isPolling: Bool = false
+    private let ghAvailable: Bool
+
+    private static let pollingQueue = DispatchQueue(
+        label: "com.kolt.ci-poller",
+        qos: .utility
+    )
+
+    // MARK: - Init
+
+    init() {
+        self.ghAvailable = Self.checkGhAvailability()
+        if !ghAvailable {
+            status = .unknown
+            #if DEBUG
+            dlog("ci-poller: gh CLI not available, CI polling disabled")
+            #endif
+        }
+    }
+
+    deinit {
+        stopTimer()
+    }
+
+    // MARK: - Public API
+
+    func start(branch: String) {
+        guard ghAvailable else { return }
+
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            stop()
+            return
+        }
+
+        let branchChanged = self.branch != trimmed
+        self.branch = trimmed
+
+        if branchChanged {
+            status = .unknown
+            runs = []
+            latestRunURL = nil
+        }
+
+        guard !isPolling else {
+            if branchChanged { refresh() }
+            return
+        }
+
+        isPolling = true
+
+        #if DEBUG
+        dlog("ci-poller: start polling branch=\(trimmed)")
+        #endif
+
+        let initialDelay: TimeInterval = 5
+        Self.pollingQueue.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
+            self?.performPoll()
+        }
+
+        scheduleTimer()
+    }
+
+    func stop() {
+        guard isPolling else { return }
+        isPolling = false
+        branch = nil
+        stopTimer()
+
+        #if DEBUG
+        dlog("ci-poller: stopped")
+        #endif
+    }
+
+    func refresh() {
+        guard ghAvailable, let branch, !branch.isEmpty else { return }
+
+        #if DEBUG
+        dlog("ci-poller: manual refresh for branch=\(branch)")
+        #endif
+
+        Self.pollingQueue.async { [weak self] in
+            self?.performPoll()
+        }
+    }
+
+    // MARK: - Timer Management
+
+    private func scheduleTimer() {
+        stopTimer()
+        let timer = DispatchSource.makeTimerSource(queue: Self.pollingQueue)
+        timer.schedule(
+            deadline: .now() + Self.pollInterval,
+            repeating: Self.pollInterval,
+            leeway: .seconds(5)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performPoll()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private nonisolated func stopTimer() {
+        timer?.cancel()
+    }
+
+    // MARK: - Polling (background queue)
+
+    private nonisolated func performPoll() {
+        guard let branch = DispatchQueue.main.sync(execute: { self.branch }),
+              !branch.isEmpty else {
+            return
+        }
+
+        let ghPath = Self.resolveGhPath()
+        guard let ghPath else {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh path not found during poll")
+            }
+            #endif
+            return
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: ghPath)
+        process.arguments = [
+            "run", "list",
+            "--branch", branch,
+            "--limit", "5",
+            "--json", "status,conclusion,name,workflowName,url"
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh process launch failed: \(error.localizedDescription)")
+            }
+            #endif
+            return
+        }
+
+        guard process.terminationStatus == 0 else {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh exited with status \(process.terminationStatus)")
+            }
+            #endif
+            return
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+
+        guard !data.isEmpty else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyResults(runs: [], status: .none)
+            }
+            return
+        }
+
+        let decoder = JSONDecoder()
+        do {
+            let decoded = try decoder.decode([CIRunInfo].self, from: data)
+            let aggregated = Self.aggregateStatus(from: decoded)
+            let latestURL = decoded.first?.url
+
+            DispatchQueue.main.async { [weak self] in
+                self?.applyResults(runs: decoded, status: aggregated, latestURL: latestURL)
+            }
+        } catch {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: JSON decode failed: \(error.localizedDescription)")
+            }
+            #endif
+        }
+    }
+
+    // MARK: - Result Application (main thread)
+
+    private func applyResults(runs: [CIRunInfo], status: CIStatus, latestURL: String? = nil) {
+        let changed = self.runs != runs || self.status != status
+        if changed {
+            self.runs = runs
+            self.status = status
+            self.latestRunURL = latestURL
+
+            #if DEBUG
+            dlog("ci-poller: updated status=\(status.rawValue) runs=\(runs.count)")
+            #endif
+        }
+    }
+
+    // MARK: - Status Aggregation
+
+    nonisolated static func aggregateStatus(from runs: [CIRunInfo]) -> CIStatus {
+        guard !runs.isEmpty else { return .none }
+
+        var hasRunning = false
+        var hasFailed = false
+        var hasPassed = false
+
+        for run in runs {
+            let status = run.status.lowercased()
+            let conclusion = run.conclusion?.lowercased()
+
+            if status == "in_progress" || status == "queued" || status == "waiting" || status == "pending" {
+                hasRunning = true
+            } else if status == "completed" {
+                switch conclusion {
+                case "success":
+                    hasPassed = true
+                case "failure", "timed_out", "cancelled":
+                    hasFailed = true
+                default:
+                    break
+                }
+            }
+        }
+
+        if hasRunning { return .running }
+        if hasFailed { return .failing }
+        if hasPassed { return .passing }
+        return .unknown
+    }
+
+    // MARK: - gh CLI Resolution
+
+    private nonisolated static func checkGhAvailability() -> Bool {
+        resolveGhPath() != nil
+    }
+
+    private nonisolated static func resolveGhPath() -> String? {
+        let candidates = [
+            "/usr/local/bin/gh",
+            "/opt/homebrew/bin/gh",
+            "/usr/bin/gh"
+        ]
+        for candidate in candidates {
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = ["gh"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let path = output, !path.isEmpty,
+              FileManager.default.isExecutableFile(atPath: path) else {
+            return nil
+        }
+        return path
+    }
+
+    // MARK: - Mapping to Sidebar PR Checks Status
+
+    var checksStatus: SidebarPullRequestChecksStatus? {
+        switch status {
+        case .passing:
+            return .pass
+        case .failing:
+            return .fail
+        case .running:
+            return .pending
+        case .none, .unknown:
+            return nil
+        }
+    }
+}
+
 private func normalizedSidebarBranchName(_ branch: String?) -> String? {
     guard let branch else { return nil }
     let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5531,6 +5865,8 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var remoteLastHeartbeatAt: Date?
     @Published var listeningPorts: [Int] = []
     @Published private(set) var activeRemoteTerminalSessionCount: Int = 0
+    @Published var ciPoller: CIStatusPoller?
+    private var ciPollerSubscription: AnyCancellable?
     var surfaceTTYNames: [UUID: String] = [:]
     private var remoteSessionController: WorkspaceRemoteSessionController?
     fileprivate var activeRemoteSessionControllerID: UUID?
@@ -6416,6 +6752,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
         if panelId == focusedPanelId {
             gitBranch = state
+            reconcileCIPolling()
         }
     }
 
@@ -6425,6 +6762,7 @@ final class Workspace: Identifiable, ObservableObject {
         if panelId == focusedPanelId {
             gitBranch = nil
             pullRequest = nil
+            stopCIPolling()
         }
     }
 
@@ -10790,4 +11128,68 @@ extension Workspace: BonsplitDelegate {
     }
 
     // No post-close polling refresh loop: we rely on view invariants and Ghostty's wakeups.
+
+    // MARK: - CI Status Polling
+
+    /// Call when the focused panel's git branch may have changed.
+    /// Creates, starts, or stops the `CIStatusPoller` based on the current branch.
+    func reconcileCIPolling() {
+        guard let branchName = gitBranch?.branch,
+              !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            stopCIPolling()
+            return
+        }
+
+        if ciPoller == nil {
+            let poller = CIStatusPoller()
+            ciPoller = poller
+            ciPollerSubscription = poller.$status
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.propagateCIStatusToPullRequests()
+                }
+        }
+
+        ciPoller?.start(branch: branchName)
+    }
+
+    /// Stops CI polling and cleans up subscriptions.
+    func stopCIPolling() {
+        ciPollerSubscription?.cancel()
+        ciPollerSubscription = nil
+        ciPoller?.stop()
+        ciPoller = nil
+    }
+
+    /// When the CI poller produces new results, propagate the checks status
+    /// to all panel pull requests that share the same branch.
+    private func propagateCIStatusToPullRequests() {
+        guard let poller = ciPoller,
+              let branchName = gitBranch?.branch else { return }
+
+        let checksStatus = poller.checksStatus
+
+        for (panelId, prState) in panelPullRequests {
+            guard prState.status == .open else { continue }
+            let prBranch = normalizedSidebarBranchName(prState.branch)
+            let currentBranch = normalizedSidebarBranchName(branchName)
+            if prBranch == currentBranch {
+                let updated = SidebarPullRequestState(
+                    number: prState.number,
+                    label: prState.label,
+                    url: prState.url,
+                    status: prState.status,
+                    branch: prState.branch,
+                    checks: checksStatus ?? prState.checks
+                )
+                if panelPullRequests[panelId] != updated {
+                    panelPullRequests[panelId] = updated
+                    if panelId == focusedPanelId {
+                        pullRequest = updated
+                    }
+                }
+            }
+        }
+    }
 }
