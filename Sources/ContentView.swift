@@ -5026,6 +5026,8 @@ struct ContentView: View {
             return String(localized: "commandPalette.kind.browser", defaultValue: "Browser")
         case .markdown:
             return String(localized: "commandPalette.kind.markdown", defaultValue: "Markdown")
+        case .diff:
+            return String(localized: "commandPalette.kind.diff", defaultValue: "Diff")
         }
     }
 
@@ -5037,6 +5039,8 @@ struct ContentView: View {
             return ["browser", "web", "page"]
         case .markdown:
             return ["markdown", "note", "preview"]
+        case .diff:
+            return ["diff", "changes", "git"]
         }
     }
 

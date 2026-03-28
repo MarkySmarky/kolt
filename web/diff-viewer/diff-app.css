@@ -1,0 +1,360 @@
+/* Dark theme diff viewer matching terminal aesthetic */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #252526;
+    --bg-tertiary: #2d2d2d;
+    --bg-hover: #333333;
+    --bg-selected: #37373d;
+    --text-primary: #d4d4d4;
+    --text-secondary: #969696;
+    --text-muted: #6a6a6a;
+    --border-color: #3c3c3c;
+    --scrollbar-track: #1e1e1e;
+    --scrollbar-thumb: #424242;
+    --status-modified: #4a9eff;
+    --status-added: #4ec56a;
+    --status-deleted: #f85149;
+    --status-renamed: #e09956;
+    --diff-add-bg: rgba(46, 160, 67, 0.15);
+    --diff-add-highlight: rgba(46, 160, 67, 0.3);
+    --diff-del-bg: rgba(248, 81, 73, 0.15);
+    --diff-del-highlight: rgba(248, 81, 73, 0.3);
+    --diff-hunk-bg: rgba(56, 139, 253, 0.1);
+    --diff-hunk-text: #79a8d2;
+    --line-number-text: #5a5a5a;
+    --line-number-bg: #1e1e1e;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+}
+
+#app {
+    display: flex;
+    height: 100%;
+    width: 100%;
+}
+
+/* File tree panel */
+#file-tree {
+    width: 250px;
+    min-width: 200px;
+    max-width: 400px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#file-tree-header {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+}
+
+#file-list {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.file-item {
+    display: flex;
+    align-items: center;
+    padding: 5px 12px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: background-color 0.1s;
+    user-select: none;
+}
+
+.file-item:hover {
+    background: var(--bg-hover);
+}
+
+.file-item.selected {
+    background: var(--bg-selected);
+    border-left-color: var(--status-modified);
+}
+
+.file-item .status-badge {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-right: 8px;
+}
+
+.file-item .status-badge.status-M { color: var(--status-modified); background: rgba(74, 158, 255, 0.15); }
+.file-item .status-badge.status-A { color: var(--status-added); background: rgba(78, 197, 106, 0.15); }
+.file-item .status-badge.status-D { color: var(--status-deleted); background: rgba(248, 81, 73, 0.15); }
+.file-item .status-badge.status-R { color: var(--status-renamed); background: rgba(224, 153, 86, 0.15); }
+
+.file-item .file-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-family: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+.file-item .file-dir {
+    color: var(--text-muted);
+}
+
+.file-item .file-stats {
+    display: flex;
+    gap: 4px;
+    font-size: 11px;
+    font-family: "SF Mono", "Menlo", "Monaco", monospace;
+    margin-left: 8px;
+    flex-shrink: 0;
+}
+
+.file-item .stat-add {
+    color: var(--status-added);
+}
+
+.file-item .stat-del {
+    color: var(--status-deleted);
+}
+
+/* Diff view panel */
+#diff-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-primary);
+}
+
+#diff-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+    min-height: 32px;
+}
+
+#diff-filename {
+    font-size: 12px;
+    font-family: "SF Mono", "Menlo", "Monaco", monospace;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#diff-controls {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+#toggle-view {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background-color 0.1s, color 0.1s;
+}
+
+#toggle-view:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+#diff-content {
+    flex: 1;
+    overflow: auto;
+    background: var(--bg-primary);
+}
+
+#diff-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    gap: 12px;
+}
+
+.placeholder-icon {
+    font-size: 48px;
+    opacity: 0.3;
+}
+
+.placeholder-text {
+    font-size: 14px;
+}
+
+/* Diff rendering */
+.diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "SF Mono", "Menlo", "Monaco", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    table-layout: fixed;
+}
+
+.diff-table td {
+    padding: 0 12px;
+    vertical-align: top;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.diff-table .line-number {
+    width: 50px;
+    min-width: 50px;
+    max-width: 50px;
+    text-align: right;
+    color: var(--line-number-text);
+    background: var(--line-number-bg);
+    padding: 0 8px;
+    user-select: none;
+    border-right: 1px solid var(--border-color);
+}
+
+.diff-table .line-content {
+    padding-left: 16px;
+}
+
+.diff-table .line-prefix {
+    display: inline-block;
+    width: 12px;
+    text-align: center;
+    user-select: none;
+    color: var(--text-muted);
+}
+
+/* Line type styles */
+.diff-line-add {
+    background: var(--diff-add-bg);
+}
+
+.diff-line-add .line-content {
+    color: var(--text-primary);
+}
+
+.diff-line-add .line-prefix {
+    color: var(--status-added);
+}
+
+.diff-line-del {
+    background: var(--diff-del-bg);
+}
+
+.diff-line-del .line-content {
+    color: var(--text-primary);
+}
+
+.diff-line-del .line-prefix {
+    color: var(--status-deleted);
+}
+
+.diff-line-hunk {
+    background: var(--diff-hunk-bg);
+}
+
+.diff-line-hunk td {
+    color: var(--diff-hunk-text);
+    font-style: italic;
+    padding: 4px 12px;
+}
+
+.diff-line-context {
+    background: transparent;
+}
+
+.diff-line-context .line-content {
+    color: var(--text-secondary);
+}
+
+/* Side-by-side mode */
+.diff-table.side-by-side {
+    table-layout: fixed;
+}
+
+.diff-table.side-by-side .side-left,
+.diff-table.side-by-side .side-right {
+    width: 50%;
+}
+
+.diff-table.side-by-side .side-left {
+    border-right: 1px solid var(--border-color);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+::-webkit-scrollbar-corner {
+    background: var(--scrollbar-track);
+}
+
+/* Empty state when no files changed */
+.no-changes {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 13px;
+    gap: 8px;
+    padding: 20px;
+    text-align: center;
+}
+
+.no-changes-icon {
+    font-size: 32px;
+    opacity: 0.3;
+}
