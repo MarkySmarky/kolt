@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Bonsplit
 
 /// Represents a file changed in the git working directory.
 struct ChangedFile: Equatable, Sendable {
@@ -80,7 +81,9 @@ final class GitWatcher: ObservableObject {
         let fd = open(gitIndexPath, O_EVTONLY)
         guard fd >= 0 else {
             #if DEBUG
+            #if DEBUG
             dlog("[GitWatcher] Failed to open .git/index at \(gitIndexPath)")
+            #endif
             #endif
             return
         }
@@ -214,7 +217,9 @@ final class GitWatcher: ObservableObject {
             process.waitUntilExit()
         } catch {
             #if DEBUG
+            #if DEBUG
             dlog("[GitWatcher] git command failed: \(arguments.joined(separator: " ")) error=\(error)")
+            #endif
             #endif
             return ""
         }

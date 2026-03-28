@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import WebKit
 import AppKit
+import Bonsplit
 
 /// A panel that displays a live git diff viewer using a WKWebView.
 /// Watches the git working directory for changes and renders diffs
@@ -144,7 +145,9 @@ final class DiffPanel: Panel, ObservableObject {
     func loadDiffViewer() {
         guard let resourceURL = Bundle.main.resourceURL else {
             #if DEBUG
+            #if DEBUG
             dlog("[DiffPanel] Bundle.main.resourceURL is nil")
+            #endif
             #endif
             return
         }
@@ -154,7 +157,9 @@ final class DiffPanel: Panel, ObservableObject {
 
         guard FileManager.default.fileExists(atPath: indexURL.path) else {
             #if DEBUG
+            #if DEBUG
             dlog("[DiffPanel] diff-viewer/index.html not found at \(indexURL.path)")
+            #endif
             #endif
             return
         }
@@ -252,7 +257,9 @@ final class DiffPanel: Panel, ObservableObject {
         webView.evaluateJavaScript(js) { _, error in
             #if DEBUG
             if let error {
+                #if DEBUG
                 dlog("[DiffPanel] updateFileList JS error: \(error)")
+                #endif
             }
             #endif
         }
@@ -263,7 +270,9 @@ final class DiffPanel: Panel, ObservableObject {
         webView.evaluateJavaScript(js) { _, error in
             #if DEBUG
             if let error {
+                #if DEBUG
                 dlog("[DiffPanel] updateFileDiff JS error: \(error)")
+                #endif
             }
             #endif
         }
@@ -307,7 +316,9 @@ final class DiffPanel: Panel, ObservableObject {
             webViewDidFinishLoading()
         default:
             #if DEBUG
+            #if DEBUG
             dlog("[DiffPanel] Unknown script message action: \(action)")
+            #endif
             #endif
             break
         }
