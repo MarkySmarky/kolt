@@ -2084,6 +2084,16 @@ class TerminalController {
         case "workspace.remote.terminal_session_end":
             return v2Result(id: id, self.v2WorkspaceRemoteTerminalSessionEnd(params: params))
 
+        // Worktrees
+        case "worktree.list":
+            return v2Result(id: id, self.v2WorktreeList(params: params))
+        case "worktree.add":
+            return v2Result(id: id, self.v2WorktreeAdd(params: params))
+        case "worktree.remove":
+            return v2Result(id: id, self.v2WorktreeRemove(params: params))
+        case "worktree.switch":
+            return v2Result(id: id, self.v2WorktreeSwitch(params: params))
+
         // Settings
         case "settings.open":
             return v2Result(id: id, self.v2SettingsOpen(params: params))
@@ -2451,6 +2461,10 @@ class TerminalController {
             "workspace.remote.disconnect",
             "workspace.remote.status",
             "workspace.remote.terminal_session_end",
+            "worktree.list",
+            "worktree.add",
+            "worktree.remove",
+            "worktree.switch",
             "settings.open",
             "feedback.open",
             "feedback.submit",
@@ -15583,6 +15597,239 @@ class TerminalController {
             }
         }
         return result
+    }
+
+    // MARK: - V2 Worktree Commands
+
+    /// Lists all worktree-associated workspaces.
+    private func v2WorktreeList(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var worktrees: [[String: Any]] = []
+        v2MainSync {
+            for workspace in tabManager.tabs {
+                guard let info = workspace.worktreeInfo else { continue }
+                worktrees.append([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "path": info.path,
+                    "branch": info.branch,
+                    "commit_hash": info.commitHash,
+                    "is_main": info.isMain
+                ])
+            }
+        }
+
+        return .ok(["worktrees": worktrees])
+    }
+
+    /// Creates a new worktree and opens a workspace for it.
+    private func v2WorktreeAdd(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        guard let branch = v2String(params, "branch") else {
+            return .err(code: "invalid_params", message: "Missing or empty 'branch' parameter", data: nil)
+        }
+
+        let baseBranch = v2RawString(params, "base_branch")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let directory = v2RawString(params, "directory")?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Find a source workspace to determine the repository context
+        var sourceWorkspace: Workspace?
+        let sourceWorkspaceId = v2UUID(params, "workspace_id")
+        v2MainSync {
+            if let wsId = sourceWorkspaceId {
+                sourceWorkspace = tabManager.tabs.first(where: { $0.id == wsId })
+            } else {
+                sourceWorkspace = tabManager.selectedWorkspace
+            }
+        }
+
+        guard let source = sourceWorkspace else {
+            return .err(code: "unavailable", message: "No workspace available for git context", data: nil)
+        }
+
+        // Run the async worktree creation synchronously on the socket handler queue.
+        // Socket commands default to off-main handling per threading policy.
+        var resultInfo: WorktreeManager.WorktreeInfo?
+        var resultError: String?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        Task { @MainActor in
+            do {
+                resultInfo = try await source.createWorktree(
+                    branch: branch,
+                    baseBranch: baseBranch?.isEmpty == false ? baseBranch : nil,
+                    directory: directory?.isEmpty == false ? directory : nil
+                )
+            } catch {
+                resultError = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        guard let info = resultInfo else {
+            return .err(
+                code: "worktree_error",
+                message: resultError ?? "Failed to create worktree",
+                data: nil
+            )
+        }
+
+        // Create a workspace for the worktree
+        var newWorkspaceId: UUID?
+        let shouldFocus = v2FocusAllowed()
+        v2MainSync {
+            let ws = tabManager.addWorkspace(
+                title: branch,
+                workingDirectory: info.path,
+                select: shouldFocus,
+                eagerLoadTerminal: !shouldFocus
+            )
+            ws.attachWorktree(info)
+            newWorkspaceId = ws.id
+        }
+
+        guard let wsId = newWorkspaceId else {
+            return .err(code: "internal_error", message: "Failed to create workspace for worktree", data: nil)
+        }
+
+        let windowId = v2ResolveWindowId(tabManager: tabManager)
+        return .ok([
+            "workspace_id": wsId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: wsId),
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "path": info.path,
+            "branch": info.branch,
+            "commit_hash": info.commitHash
+        ])
+    }
+
+    /// Removes a worktree and optionally closes the associated workspace.
+    private func v2WorktreeRemove(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        let force = v2Bool(params, "force") ?? false
+
+        // Resolve the target workspace
+        var targetWorkspace: Workspace?
+        v2MainSync {
+            if let wsId = v2UUID(params, "workspace_id") {
+                targetWorkspace = tabManager.tabs.first(where: { $0.id == wsId })
+            } else if let path = v2String(params, "path") {
+                targetWorkspace = tabManager.tabs.first(where: {
+                    $0.worktreeInfo?.path == path
+                })
+            }
+        }
+
+        guard let workspace = targetWorkspace,
+              let info = workspace.worktreeInfo else {
+            return .err(code: "not_found", message: "No worktree workspace found", data: nil)
+        }
+
+        guard !info.isMain else {
+            return .err(code: "invalid_operation", message: "Cannot remove the main worktree", data: nil)
+        }
+
+        // Remove the worktree asynchronously.
+        // Socket commands default to off-main handling per threading policy.
+        var resultError: String?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        Task { @MainActor in
+            do {
+                try await workspace.removeWorktree(path: info.path, force: force)
+            } catch {
+                resultError = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        if let error = resultError {
+            return .err(code: "worktree_error", message: error, data: nil)
+        }
+
+        // Close the workspace
+        let closeWorkspaces = v2Bool(params, "close_workspace") ?? true
+        if closeWorkspaces {
+            v2MainSync {
+                workspace.detachWorktree()
+                tabManager.closeWorkspace(workspace)
+            }
+        } else {
+            v2MainSync {
+                workspace.detachWorktree()
+            }
+        }
+
+        return .ok(["removed": true, "branch": info.branch, "path": info.path])
+    }
+
+    /// Switches to a worktree workspace by branch name or path.
+    private func v2WorktreeSwitch(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        let targetBranch = v2String(params, "branch")
+        let targetPath = v2String(params, "path")
+        let targetWorkspaceId = v2UUID(params, "workspace_id")
+
+        guard targetBranch != nil || targetPath != nil || targetWorkspaceId != nil else {
+            return .err(
+                code: "invalid_params",
+                message: "Must provide 'branch', 'path', or 'workspace_id' to switch to",
+                data: nil
+            )
+        }
+
+        var matchedWorkspace: Workspace?
+        v2MainSync {
+            for ws in tabManager.tabs {
+                guard let info = ws.worktreeInfo else { continue }
+                if let wsId = targetWorkspaceId, ws.id == wsId {
+                    matchedWorkspace = ws
+                    break
+                }
+                if let branch = targetBranch, info.branch == branch {
+                    matchedWorkspace = ws
+                    break
+                }
+                if let path = targetPath, info.path == path {
+                    matchedWorkspace = ws
+                    break
+                }
+            }
+        }
+
+        guard let workspace = matchedWorkspace else {
+            return .err(code: "not_found", message: "No worktree workspace matching the given criteria", data: nil)
+        }
+
+        v2MainSync {
+            v2MaybeFocusWindow(for: tabManager)
+            v2MaybeSelectWorkspace(tabManager, workspace: workspace)
+        }
+
+        let windowId = v2ResolveWindowId(tabManager: tabManager)
+        return .ok([
+            "workspace_id": workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "branch": v2OrNull(workspace.worktreeInfo?.branch),
+            "path": v2OrNull(workspace.worktreeInfo?.path)
+        ])
     }
 
     deinit {
