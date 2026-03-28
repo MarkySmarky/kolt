@@ -11511,6 +11511,7 @@ private struct TabItemView: View, Equatable {
                                     .underline()
                                     .lineLimit(1)
                                     .truncationMode(.tail)
+                                checksStatusDot(pullRequest.checks)
                                 Text(pullRequestStatusLabel(pullRequest.status, checks: pullRequest.checks))
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
@@ -11522,6 +11523,11 @@ private struct TabItemView: View, Equatable {
                         .safeHelp(String(localized: "sidebar.pullRequest.openTooltip", defaultValue: "Open \(pullRequest.label) #\(pullRequest.number)"))
                     }
                 }
+            }
+
+            // CI status row (shown below PR rows when CI data is available)
+            if detailVisibility.showsPullRequests {
+                ciStatusIndicator(for: tab)
             }
 
             // Ports row
@@ -12423,13 +12429,134 @@ private struct TabItemView: View, Equatable {
 
     private func pullRequestStatusLabel(
         _ status: SidebarPullRequestStatus,
-        checks _: SidebarPullRequestChecksStatus?
+        checks: SidebarPullRequestChecksStatus?
     ) -> String {
+        let base: String
         switch status {
-        case .open: return String(localized: "sidebar.pullRequest.statusOpen", defaultValue: "open")
-        case .merged: return String(localized: "sidebar.pullRequest.statusMerged", defaultValue: "merged")
-        case .closed: return String(localized: "sidebar.pullRequest.statusClosed", defaultValue: "closed")
+        case .open: base = String(localized: "sidebar.pullRequest.statusOpen", defaultValue: "open")
+        case .merged: base = String(localized: "sidebar.pullRequest.statusMerged", defaultValue: "merged")
+        case .closed: base = String(localized: "sidebar.pullRequest.statusClosed", defaultValue: "closed")
         }
+        guard status == .open, let checks else { return base }
+        let checksSuffix: String
+        switch checks {
+        case .pass:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksPass", defaultValue: "passing")
+        case .fail:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksFail", defaultValue: "failing")
+        case .pending:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksPending", defaultValue: "running")
+        }
+        return "\(base) \u{00B7} \(checksSuffix)"
+    }
+
+    @ViewBuilder
+    private func checksStatusDot(_ checks: SidebarPullRequestChecksStatus?) -> some View {
+        if let checks {
+            Circle()
+                .fill(checksStatusColor(checks))
+                .frame(width: 5, height: 5)
+                .safeHelp(checksStatusTooltip(checks))
+        }
+    }
+
+    private func checksStatusColor(_ checks: SidebarPullRequestChecksStatus) -> Color {
+        switch checks {
+        case .pass: return .green
+        case .fail: return .red
+        case .pending: return .yellow
+        }
+    }
+
+    private func checksStatusTooltip(_ checks: SidebarPullRequestChecksStatus) -> String {
+        switch checks {
+        case .pass:
+            return String(localized: "sidebar.ci.checksPassTooltip", defaultValue: "CI checks passing")
+        case .fail:
+            return String(localized: "sidebar.ci.checksFailTooltip", defaultValue: "CI checks failing")
+        case .pending:
+            return String(localized: "sidebar.ci.checksPendingTooltip", defaultValue: "CI checks running")
+        }
+    }
+
+    @ViewBuilder
+    private func ciStatusIndicator(for workspace: Workspace) -> some View {
+        if let poller = workspace.ciPoller, poller.status != .unknown {
+            Button(action: {
+                openCIRunURL(workspace: workspace)
+            }) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(ciStatusColor(poller.status))
+                        .frame(width: 5, height: 5)
+                    Text(ciStatusLabel(poller.status))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
+            }
+            .buttonStyle(.plain)
+            .safeHelp(ciStatusTooltip(poller.status))
+        }
+    }
+
+    private func ciStatusColor(_ status: CIStatusPoller.CIStatus) -> Color {
+        switch status {
+        case .passing: return .green
+        case .failing: return .red
+        case .running: return .yellow
+        case .none: return .gray
+        case .unknown: return .gray
+        }
+    }
+
+    private func ciStatusLabel(_ status: CIStatusPoller.CIStatus) -> String {
+        switch status {
+        case .passing:
+            return String(localized: "sidebar.ci.statusPassing", defaultValue: "CI passing")
+        case .failing:
+            return String(localized: "sidebar.ci.statusFailing", defaultValue: "CI failing")
+        case .running:
+            return String(localized: "sidebar.ci.statusRunning", defaultValue: "CI running")
+        case .none:
+            return String(localized: "sidebar.ci.statusNone", defaultValue: "No CI runs")
+        case .unknown:
+            return String(localized: "sidebar.ci.statusUnknown", defaultValue: "CI status unknown")
+        }
+    }
+
+    private func ciStatusTooltip(_ status: CIStatusPoller.CIStatus) -> String {
+        switch status {
+        case .passing:
+            return String(localized: "sidebar.ci.passingTooltip", defaultValue: "CI checks are passing. Click to open.")
+        case .failing:
+            return String(localized: "sidebar.ci.failingTooltip", defaultValue: "CI checks are failing. Click to open.")
+        case .running:
+            return String(localized: "sidebar.ci.runningTooltip", defaultValue: "CI checks are running. Click to open.")
+        case .none:
+            return String(localized: "sidebar.ci.noneTooltip", defaultValue: "No CI workflow runs found.")
+        case .unknown:
+            return String(localized: "sidebar.ci.unknownTooltip", defaultValue: "CI status is unknown.")
+        }
+    }
+
+    private func openCIRunURL(workspace: Workspace) {
+        updateSelection()
+        guard let urlString = workspace.ciPoller?.latestRunURL,
+              let url = URL(string: urlString) else { return }
+
+        if openSidebarPullRequestLinksInCmuxBrowser {
+            if tabManager.openBrowser(
+                inWorkspace: tab.id,
+                url: url,
+                preferSplitRight: true,
+                insertAtEnd: true
+            ) != nil {
+                return
+            }
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func logLevelIcon(_ level: SidebarLogLevel) -> String {

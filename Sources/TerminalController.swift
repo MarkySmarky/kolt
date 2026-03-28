@@ -2366,6 +2366,13 @@ class TerminalController {
         case "surface.read_text":
             return v2Result(id: id, self.v2SurfaceReadText(params: params))
 
+        // CI Status
+        case "ci.status":
+            return v2Result(id: id, self.v2CIStatus(params: params))
+        case "ci.refresh":
+            return v2Result(id: id, self.v2CIRefresh(params: params))
+        case "ci.open":
+            return v2Result(id: id, self.v2CIOpen(params: params))
 
 #if DEBUG
         // Debug / test-only
@@ -15988,6 +15995,139 @@ class TerminalController {
             "branch": v2OrNull(workspace.worktreeInfo?.branch),
             "path": v2OrNull(workspace.worktreeInfo?.path)
         ])
+    }
+
+    // MARK: - V2 CI Status Methods
+
+    private func v2CIStatus(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to read CI status", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller else {
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "ci_status": "unavailable",
+                    "ci_available": false,
+                    "runs": [] as [[String: Any]]
+                ])
+                return
+            }
+
+            let runsPayload: [[String: Any]] = poller.runs.map { run in
+                var entry: [String: Any] = [
+                    "status": run.status,
+                    "name": run.name,
+                    "workflow_name": run.workflowName,
+                    "url": run.url
+                ]
+                entry["conclusion"] = run.conclusion ?? NSNull()
+                return entry
+            }
+
+            result = .ok([
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "ci_status": poller.status.rawValue,
+                "ci_available": true,
+                "latest_run_url": v2OrNull(poller.latestRunURL),
+                "runs": runsPayload
+            ])
+        }
+
+        return result
+    }
+
+    private func v2CIRefresh(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to refresh CI status", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller else {
+                result = .err(
+                    code: "unavailable",
+                    message: "CI polling not active for this workspace",
+                    data: ["workspace_id": workspace.id.uuidString]
+                )
+                return
+            }
+
+            poller.refresh()
+            result = .ok([
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "refreshed": true
+            ])
+        }
+
+        return result
+    }
+
+    private func v2CIOpen(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to open CI URL", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller,
+                  let urlString = poller.latestRunURL,
+                  let url = URL(string: urlString) else {
+                result = .err(
+                    code: "unavailable",
+                    message: "No CI run URL available",
+                    data: ["workspace_id": workspace.id.uuidString]
+                )
+                return
+            }
+
+            let panelId = tabManager.openBrowser(
+                inWorkspace: workspace.id,
+                url: url,
+                preferSplitRight: true,
+                insertAtEnd: true
+            )
+
+            if let panelId {
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "surface_id": panelId.uuidString,
+                    "surface_ref": v2Ref(kind: .surface, uuid: panelId),
+                    "url": urlString
+                ])
+            } else {
+                NSWorkspace.shared.open(url)
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "opened_externally": true,
+                    "url": urlString
+                ])
+            }
+        }
+
+        return result
     }
 
     deinit {
