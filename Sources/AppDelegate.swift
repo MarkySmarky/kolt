@@ -5507,6 +5507,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    func promptCreateWorktreeFromShortcut() {
+        guard let context = preferredMainWindowContextForWorkspaceCreation(debugSource: "shortcut.createWorktree"),
+              let workspace = context.tabManager.selectedWorkspace else {
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "worktree.create.title", defaultValue: "Create Worktree")
+        alert.informativeText = String(
+            localized: "worktree.create.message",
+            defaultValue: "Enter the branch name for the new worktree:"
+        )
+        alert.addButton(withTitle: String(localized: "common.create", defaultValue: "Create"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        inputField.placeholderString = String(
+            localized: "worktree.create.placeholder",
+            defaultValue: "feature/my-branch"
+        )
+        alert.accessoryView = inputField
+        alert.window.initialFirstResponder = inputField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let branchName = inputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branchName.isEmpty else { return }
+
+        let tabManager = context.tabManager
+        Task { @MainActor in
+            do {
+                let info = try await workspace.createWorktree(
+                    branch: branchName,
+                    baseBranch: nil,
+                    directory: nil
+                )
+                let newWorkspace = tabManager.addWorkspace(
+                    title: branchName,
+                    workingDirectory: info.path,
+                    select: true
+                )
+                newWorkspace.attachWorktree(info)
+            } catch {
+                #if DEBUG
+                dlog("worktree.create.shortcut.error \(error.localizedDescription)")
+                #endif
+                let errorAlert = NSAlert()
+                errorAlert.messageText = String(
+                    localized: "worktree.create.errorTitle",
+                    defaultValue: "Worktree Creation Failed"
+                )
+                errorAlert.informativeText = error.localizedDescription
+                errorAlert.alertStyle = .warning
+                errorAlert.runModal()
+            }
+        }
+    }
+
     @objc func openWindow(
         _ pasteboard: NSPasteboard,
         userData: String?,
@@ -9517,6 +9574,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             setActiveMainWindow(targetWindow)
             bringToFront(targetWindow)
             NotificationCenter.default.post(name: .feedbackComposerRequested, object: targetWindow)
+            return true
+        }
+
+        // Create Worktree: Cmd+Shift+G
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .createWorktree)) {
+            promptCreateWorktreeFromShortcut()
             return true
         }
 
