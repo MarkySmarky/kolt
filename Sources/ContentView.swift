@@ -7108,6 +7108,8 @@ struct ContentView: View {
             return "browser.addressBar"
         case .browser(.findField):
             return "browser.findField"
+        case .diff:
+            return "diff.webView"
         }
     }
 #endif
