@@ -2345,6 +2345,14 @@ class TerminalController {
         case "markdown.open":
             return v2Result(id: id, self.v2MarkdownOpen(params: params))
 
+        // Diff
+        case "diff.create":
+            return v2Result(id: id, self.v2DiffCreate(params: params))
+        case "diff.toggle":
+            return v2Result(id: id, self.v2DiffToggle(params: params))
+        case "diff.refresh":
+            return v2Result(id: id, self.v2DiffRefresh(params: params))
+
         case "surface.read_text":
             return v2Result(id: id, self.v2SurfaceReadText(params: params))
 
@@ -7360,6 +7368,156 @@ class TerminalController {
                 "target_pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
                 "path": filePath
             ])
+        }
+        return result
+    }
+
+    // MARK: - Diff
+
+    private func v2DiffCreate(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to create diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            v2MaybeFocusWindow(for: tabManager)
+            v2MaybeSelectWorkspace(tabManager, workspace: ws)
+
+            let sourceSurfaceId = v2UUID(params, "surface_id") ?? ws.focusedPanelId
+            guard let sourceSurfaceId else {
+                result = .err(code: "not_found", message: "No focused surface to split", data: nil)
+                return
+            }
+            guard ws.panels[sourceSurfaceId] != nil else {
+                result = .err(code: "not_found", message: "Source surface not found", data: ["surface_id": sourceSurfaceId.uuidString])
+                return
+            }
+
+            let sourcePaneUUID = ws.paneId(forPanelId: sourceSurfaceId)?.id
+
+            let directionStr = v2String(params, "direction") ?? "right"
+            guard let direction = parseSplitDirection(directionStr) else {
+                result = .err(code: "invalid_params", message: "Invalid direction '\(directionStr)' (left|right|up|down)", data: nil)
+                return
+            }
+            let orientation: SplitOrientation = direction.isHorizontal ? .horizontal : .vertical
+            let insertFirst = (direction == .left || direction == .up)
+
+            // Resolve working directory: explicit param, or infer from workspace directory.
+            let workingDir = v2String(params, "path") ?? ws.currentDirectory
+
+            let createdPanel = ws.newDiffSplit(
+                from: sourceSurfaceId,
+                orientation: orientation,
+                insertFirst: insertFirst,
+                workingDirectory: workingDir,
+                focus: v2FocusAllowed()
+            )
+
+            guard let diffPanelId = createdPanel?.id else {
+                result = .err(code: "internal_error", message: "Failed to create diff panel", data: nil)
+                return
+            }
+
+            let targetPaneUUID = ws.paneId(forPanelId: diffPanelId)?.id
+            let windowId = v2ResolveWindowId(tabManager: tabManager)
+            result = .ok([
+                "window_id": v2OrNull(windowId?.uuidString),
+                "window_ref": v2Ref(kind: .window, uuid: windowId),
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "pane_id": v2OrNull(targetPaneUUID?.uuidString),
+                "pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
+                "surface_id": diffPanelId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: diffPanelId),
+                "source_surface_id": sourceSurfaceId.uuidString,
+                "source_surface_ref": v2Ref(kind: .surface, uuid: sourceSurfaceId),
+                "source_pane_id": v2OrNull(sourcePaneUUID?.uuidString),
+                "source_pane_ref": v2Ref(kind: .pane, uuid: sourcePaneUUID),
+                "target_pane_id": v2OrNull(targetPaneUUID?.uuidString),
+                "target_pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
+                "path": workingDir
+            ])
+        }
+        return result
+    }
+
+    private func v2DiffToggle(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to toggle diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            // Find existing diff panel in workspace
+            if let surfaceId = v2UUID(params, "surface_id") {
+                guard let panel = ws.panels[surfaceId] as? DiffPanel else {
+                    result = .err(code: "not_found", message: "Diff panel not found", data: ["surface_id": surfaceId.uuidString])
+                    return
+                }
+                // Toggle: close if already focused, focus if not
+                if ws.focusedPanelId == panel.id {
+                    _ = ws.closePanel(panel.id)
+                    result = .ok(["action": "closed", "surface_id": surfaceId.uuidString])
+                } else {
+                    ws.focusPanel(panel.id)
+                    result = .ok(["action": "focused", "surface_id": surfaceId.uuidString])
+                }
+            } else {
+                // Find first diff panel in workspace
+                let diffPanel = ws.panels.values.first(where: { $0 is DiffPanel }) as? DiffPanel
+                if let diffPanel {
+                    if ws.focusedPanelId == diffPanel.id {
+                        _ = ws.closePanel(diffPanel.id)
+                        result = .ok(["action": "closed", "surface_id": diffPanel.id.uuidString])
+                    } else {
+                        ws.focusPanel(diffPanel.id)
+                        result = .ok(["action": "focused", "surface_id": diffPanel.id.uuidString])
+                    }
+                } else {
+                    result = .err(code: "not_found", message: "No diff panel found in workspace", data: nil)
+                }
+            }
+        }
+        return result
+    }
+
+    private func v2DiffRefresh(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to refresh diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            let diffPanel: DiffPanel?
+            if let surfaceId = v2UUID(params, "surface_id") {
+                diffPanel = ws.panels[surfaceId] as? DiffPanel
+            } else {
+                diffPanel = ws.panels.values.first(where: { $0 is DiffPanel }) as? DiffPanel
+            }
+
+            guard let diffPanel else {
+                result = .err(code: "not_found", message: "No diff panel found in workspace", data: nil)
+                return
+            }
+
+            diffPanel.forceRefresh()
+            result = .ok(["surface_id": diffPanel.id.uuidString])
         }
         return result
     }
