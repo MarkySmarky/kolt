@@ -289,7 +289,8 @@ extension Workspace {
             statusEntries: statusSnapshots,
             logEntries: logSnapshots,
             progress: progressSnapshot,
-            gitBranch: gitBranchSnapshot
+            gitBranch: gitBranchSnapshot,
+            worktreePath: worktreeInfo?.path
         )
     }
 
@@ -337,6 +338,28 @@ extension Workspace {
         }
         progress = snapshot.progress.map { SidebarProgressState(value: $0.value, label: $0.label) }
         gitBranch = snapshot.gitBranch.map { SidebarGitBranchState(branch: $0.branch, isDirty: $0.isDirty) }
+
+        // Restore worktree association if persisted path still exists.
+        if let worktreePath = snapshot.worktreePath,
+           FileManager.default.fileExists(atPath: worktreePath) {
+            // Re-probe the worktree to get current commit info.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let worktrees = try await self.listWorktrees()
+                    let normalized = URL(fileURLWithPath: worktreePath).standardizedFileURL.path
+                    if let match = worktrees.first(where: {
+                        URL(fileURLWithPath: $0.path).standardizedFileURL.path == normalized
+                    }) {
+                        self.attachWorktree(match)
+                    }
+                } catch {
+                    #if DEBUG
+                    dlog("worktree.restore.error \(error.localizedDescription)")
+                    #endif
+                }
+            }
+        }
 
         recomputeListeningPorts()
 
@@ -5561,6 +5584,7 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var remoteLastHeartbeatAt: Date?
     @Published var listeningPorts: [Int] = []
     @Published private(set) var activeRemoteTerminalSessionCount: Int = 0
+    @Published var worktreeInfo: WorktreeManager.WorktreeInfo?
     var surfaceTTYNames: [UUID: String] = [:]
     private var remoteSessionController: WorkspaceRemoteSessionController?
     fileprivate var activeRemoteSessionControllerID: UUID?
@@ -9896,6 +9920,58 @@ final class Workspace: Identifiable, ObservableObject {
         return moved
     }
 
+    // MARK: - Worktree Management
+
+    private static let worktreeManager = WorktreeManager()
+
+    /// Associates this workspace with a worktree and updates its working directory.
+    func attachWorktree(_ info: WorktreeManager.WorktreeInfo) {
+        worktreeInfo = info
+        if !info.isMain {
+            currentDirectory = info.path
+        }
+        #if DEBUG
+        dlog("worktree.attach ws=\(id.uuidString.prefix(5)) branch=\(info.branch) path=\(info.path)")
+        #endif
+    }
+
+    /// Clears the worktree association from this workspace.
+    func detachWorktree() {
+        #if DEBUG
+        if let info = worktreeInfo {
+            dlog("worktree.detach ws=\(id.uuidString.prefix(5)) branch=\(info.branch)")
+        }
+        #endif
+        worktreeInfo = nil
+    }
+
+    /// Lists all worktrees for the repository at this workspace's current directory.
+    func listWorktrees() async throws -> [WorktreeManager.WorktreeInfo] {
+        try await Self.worktreeManager.list(workingDirectory: currentDirectory)
+    }
+
+    /// Creates a new worktree with the given branch name.
+    func createWorktree(
+        branch: String,
+        baseBranch: String?,
+        directory: String?
+    ) async throws -> WorktreeManager.WorktreeInfo {
+        try await Self.worktreeManager.add(
+            branch: branch,
+            baseBranch: baseBranch,
+            directory: directory,
+            workingDirectory: currentDirectory
+        )
+    }
+
+    /// Removes the worktree at the given path.
+    func removeWorktree(path: String, force: Bool) async throws {
+        try await Self.worktreeManager.remove(
+            path: path,
+            force: force,
+            workingDirectory: currentDirectory
+        )
+    }
 }
 
 // MARK: - BonsplitDelegate

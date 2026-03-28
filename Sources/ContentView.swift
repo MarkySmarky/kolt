@@ -11480,6 +11480,8 @@ private struct TabItemView: View, Equatable {
                         .safeHelp(protectedWorkspaceTooltip)
                 }
 
+                worktreeIndicator(for: tab)
+
                 Text(tab.title)
                     .font(.system(size: 12.5, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
@@ -12021,6 +12023,146 @@ private struct TabItemView: View, Equatable {
             markTabsUnread(targetIds)
         }
         .disabled(!hasReadNotifications(in: targetIds))
+
+        worktreeContextMenuItems(for: tab)
+    }
+
+    @ViewBuilder
+    private func worktreeContextMenuItems(for workspace: Workspace) -> some View {
+        Divider()
+        Button(String(localized: "contextMenu.createWorktree", defaultValue: "Create Worktree…")) {
+            promptCreateWorktree(for: workspace)
+        }
+        if workspace.worktreeInfo != nil {
+            Button(String(localized: "contextMenu.deleteWorktree", defaultValue: "Delete Worktree")) {
+                promptDeleteWorktree(for: workspace)
+            }
+        }
+    }
+
+    private func promptCreateWorktree(for workspace: Workspace) {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "worktree.create.title", defaultValue: "Create Worktree")
+        alert.informativeText = String(localized: "worktree.create.message", defaultValue: "Enter the branch name for the new worktree:")
+        alert.addButton(withTitle: String(localized: "common.create", defaultValue: "Create"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        inputField.placeholderString = String(localized: "worktree.create.placeholder", defaultValue: "feature/my-branch")
+        alert.accessoryView = inputField
+        alert.window.initialFirstResponder = inputField
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let branchName = inputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branchName.isEmpty else { return }
+
+        Task {
+            do {
+                let info = try await workspace.createWorktree(
+                    branch: branchName,
+                    baseBranch: nil,
+                    directory: nil
+                )
+                // Create a new workspace for the worktree
+                if let tabMgr = workspace.owningTabManager {
+                    let newWorkspace = tabMgr.addWorkspace(
+                        title: branchName,
+                        workingDirectory: info.path,
+                        select: true
+                    )
+                    newWorkspace.attachWorktree(info)
+                }
+            } catch {
+                #if DEBUG
+                dlog("worktree.create.error \(error.localizedDescription)")
+                #endif
+                let errorAlert = NSAlert()
+                errorAlert.messageText = String(localized: "worktree.create.errorTitle", defaultValue: "Worktree Creation Failed")
+                errorAlert.informativeText = error.localizedDescription
+                errorAlert.alertStyle = .warning
+                errorAlert.runModal()
+            }
+        }
+    }
+
+    private func promptDeleteWorktree(for workspace: Workspace) {
+        guard let info = workspace.worktreeInfo else { return }
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "worktree.delete.title", defaultValue: "Delete Worktree")
+        alert.informativeText = String(
+            localized: "worktree.delete.message",
+            defaultValue: "Are you sure you want to delete the worktree for branch '\(info.branch)'?"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "common.delete", defaultValue: "Delete"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task {
+            do {
+                try await workspace.removeWorktree(path: info.path, force: false)
+                workspace.detachWorktree()
+            } catch {
+                #if DEBUG
+                dlog("worktree.delete.error \(error.localizedDescription)")
+                #endif
+                // If uncommitted changes, offer force delete
+                if case WorktreeManager.WorktreeError.uncommittedChanges = error {
+                    let forceAlert = NSAlert()
+                    forceAlert.messageText = String(
+                        localized: "worktree.delete.uncommitted.title",
+                        defaultValue: "Uncommitted Changes"
+                    )
+                    forceAlert.informativeText = String(
+                        localized: "worktree.delete.uncommitted.message",
+                        defaultValue: "The worktree has uncommitted changes. Force delete?"
+                    )
+                    forceAlert.alertStyle = .critical
+                    forceAlert.addButton(withTitle: String(localized: "common.forceDelete", defaultValue: "Force Delete"))
+                    forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+                    guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                    do {
+                        try await workspace.removeWorktree(path: info.path, force: true)
+                        workspace.detachWorktree()
+                    } catch {
+                        let failAlert = NSAlert()
+                        failAlert.messageText = String(
+                            localized: "worktree.delete.errorTitle",
+                            defaultValue: "Worktree Deletion Failed"
+                        )
+                        failAlert.informativeText = error.localizedDescription
+                        failAlert.alertStyle = .warning
+                        failAlert.runModal()
+                    }
+                } else {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = String(
+                        localized: "worktree.delete.errorTitle",
+                        defaultValue: "Worktree Deletion Failed"
+                    )
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .warning
+                    errorAlert.runModal()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeIndicator(for workspace: Workspace) -> some View {
+        if workspace.worktreeInfo != nil {
+            let worktreeTooltip = String(
+                localized: "sidebar.worktree.tooltip",
+                defaultValue: "Git worktree: \(workspace.worktreeInfo?.branch ?? "")"
+            )
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(activeSecondaryColor(0.8))
+                .safeHelp(worktreeTooltip)
+        }
     }
 
     private var selectionBackgroundColor: NSColor {
