@@ -46,11 +46,15 @@ final class DiffPanel: Panel, ObservableObject {
     private var pendingFileListUpdate: String?
     private var pendingDiffUpdate: String?
 
+    /// The working directory this panel is associated with.
+    let workingDirectory: String
+
     // MARK: - Init
 
-    init(workspaceId: UUID, workingDirectory: String) {
+    init(workspaceId: UUID, workingDirectory: String, gitWatcher: GitWatcher) {
         self.id = UUID()
         self.workspaceId = workspaceId
+        self.workingDirectory = workingDirectory
 
         let configuration = WKWebViewConfiguration()
         let userContentController = WKUserContentController()
@@ -61,7 +65,7 @@ final class DiffPanel: Panel, ObservableObject {
         webView.setValue(false, forKey: "drawsBackground")
         self.webView = webView
 
-        self.gitWatcher = GitWatcher(workingDirectory: workingDirectory)
+        self.gitWatcher = gitWatcher
 
         let handler = DiffPanelScriptMessageHandler()
         handler.panel = self
@@ -85,7 +89,7 @@ final class DiffPanel: Panel, ObservableObject {
 
     func close() {
         cancellables.removeAll()
-        gitWatcher.stop()
+        // Do NOT stop the gitWatcher here — the workspace manages the shared watcher lifecycle.
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: Self.messageHandlerName
         )
@@ -145,9 +149,7 @@ final class DiffPanel: Panel, ObservableObject {
     func loadDiffViewer() {
         guard let resourceURL = Bundle.main.resourceURL else {
             #if DEBUG
-            #if DEBUG
             dlog("[DiffPanel] Bundle.main.resourceURL is nil")
-            #endif
             #endif
             return
         }
@@ -157,9 +159,7 @@ final class DiffPanel: Panel, ObservableObject {
 
         guard FileManager.default.fileExists(atPath: indexURL.path) else {
             #if DEBUG
-            #if DEBUG
             dlog("[DiffPanel] diff-viewer/index.html not found at \(indexURL.path)")
-            #endif
             #endif
             return
         }
@@ -257,9 +257,7 @@ final class DiffPanel: Panel, ObservableObject {
         webView.evaluateJavaScript(js) { _, error in
             #if DEBUG
             if let error {
-                #if DEBUG
                 dlog("[DiffPanel] updateFileList JS error: \(error)")
-                #endif
             }
             #endif
         }
@@ -270,9 +268,7 @@ final class DiffPanel: Panel, ObservableObject {
         webView.evaluateJavaScript(js) { _, error in
             #if DEBUG
             if let error {
-                #if DEBUG
                 dlog("[DiffPanel] updateFileDiff JS error: \(error)")
-                #endif
             }
             #endif
         }
@@ -314,11 +310,35 @@ final class DiffPanel: Panel, ObservableObject {
             }
         case "ready":
             webViewDidFinishLoading()
+        case "stageFile":
+            if let path = body["path"] as? String {
+                gitWatcher.stageFile(path) { [weak self] _ in
+                    self?.gitWatcher.refresh()
+                }
+            }
+        case "unstageFile":
+            if let path = body["path"] as? String {
+                gitWatcher.unstageFile(path) { [weak self] _ in
+                    self?.gitWatcher.refresh()
+                }
+            }
+        case "revertFile":
+            if let path = body["path"] as? String {
+                gitWatcher.revertFile(path) { [weak self] _ in
+                    self?.gitWatcher.refresh()
+                }
+            }
+        case "stageAll":
+            gitWatcher.stageAll { [weak self] _ in
+                self?.gitWatcher.refresh()
+            }
+        case "revertAll":
+            gitWatcher.revertAll { [weak self] _ in
+                self?.gitWatcher.refresh()
+            }
         default:
             #if DEBUG
-            #if DEBUG
             dlog("[DiffPanel] Unknown script message action: \(action)")
-            #endif
             #endif
             break
         }

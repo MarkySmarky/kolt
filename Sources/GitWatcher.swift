@@ -73,6 +73,83 @@ final class GitWatcher: ObservableObject {
         stopFileWatcher()
     }
 
+    // MARK: - Git Actions
+
+    /// Stage a file: `git add <path>`
+    func stageFile(_ path: String, completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["add", "--", path])
+            let files = self.runGitDiffNameStatus()
+            let branch = self.runGitBranchName()
+            DispatchQueue.main.async {
+                self.changedFiles = files
+                self.branchName = branch
+                completion(true)
+            }
+        }
+    }
+
+    /// Unstage a file: `git reset HEAD <path>`
+    func unstageFile(_ path: String, completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["reset", "HEAD", "--", path])
+            let files = self.runGitDiffNameStatus()
+            let branch = self.runGitBranchName()
+            DispatchQueue.main.async {
+                self.changedFiles = files
+                self.branchName = branch
+                completion(true)
+            }
+        }
+    }
+
+    /// Revert a file: `git checkout -- <path>`
+    func revertFile(_ path: String, completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["checkout", "--", path])
+            let files = self.runGitDiffNameStatus()
+            let branch = self.runGitBranchName()
+            DispatchQueue.main.async {
+                self.changedFiles = files
+                self.branchName = branch
+                completion(true)
+            }
+        }
+    }
+
+    /// Stage all files: `git add -A`
+    func stageAll(completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["add", "-A"])
+            let files = self.runGitDiffNameStatus()
+            let branch = self.runGitBranchName()
+            DispatchQueue.main.async {
+                self.changedFiles = files
+                self.branchName = branch
+                completion(true)
+            }
+        }
+    }
+
+    /// Revert all files: `git checkout -- .`
+    func revertAll(completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["checkout", "--", "."])
+            let files = self.runGitDiffNameStatus()
+            let branch = self.runGitBranchName()
+            DispatchQueue.main.async {
+                self.changedFiles = files
+                self.branchName = branch
+                completion(true)
+            }
+        }
+    }
+
     // MARK: - File Watching
 
     private func startWatching() {
@@ -81,9 +158,7 @@ final class GitWatcher: ObservableObject {
         let fd = open(gitIndexPath, O_EVTONLY)
         guard fd >= 0 else {
             #if DEBUG
-            #if DEBUG
             dlog("[GitWatcher] Failed to open .git/index at \(gitIndexPath)")
-            #endif
             #endif
             return
         }
@@ -217,9 +292,7 @@ final class GitWatcher: ObservableObject {
             process.waitUntilExit()
         } catch {
             #if DEBUG
-            #if DEBUG
             dlog("[GitWatcher] git command failed: \(arguments.joined(separator: " ")) error=\(error)")
-            #endif
             #endif
             return ""
         }

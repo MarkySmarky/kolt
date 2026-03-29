@@ -5809,6 +5809,10 @@ final class Workspace: Identifiable, ObservableObject {
     /// Mapping from bonsplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
 
+    /// Shared GitWatcher instances keyed by working directory.
+    /// All DiffPanels in the same workspace sharing a working directory reuse one watcher.
+    private var diffWatchers: [String: GitWatcher] = [:]
+
     /// Subscriptions for panel updates (e.g., browser title changes)
     private var panelSubscriptions: [UUID: AnyCancellable] = [:]
 
@@ -6440,6 +6444,16 @@ final class Workspace: Identifiable, ObservableObject {
                 )
             }
         panelSubscriptions[diffPanel.id] = subscription
+    }
+
+    /// Stops and removes the shared GitWatcher for the given working directory
+    /// if no remaining DiffPanels reference it.
+    private func pruneUnusedDiffWatcher(workingDirectory: String) {
+        let remainingDiffPanels = panels.values.compactMap { $0 as? DiffPanel }
+        let stillUsed = remainingDiffPanels.contains { $0.workingDirectory == workingDirectory }
+        if !stillUsed, let watcher = diffWatchers.removeValue(forKey: workingDirectory) {
+            watcher.stop()
+        }
     }
 
     private func browserRemoteWorkspaceStatusSnapshot() -> BrowserRemoteWorkspaceStatus? {
@@ -8309,7 +8323,16 @@ final class Workspace: Identifiable, ObservableObject {
 
         guard let paneId = sourcePaneId else { return nil }
 
-        let diffPanel = DiffPanel(workspaceId: id, workingDirectory: workingDirectory)
+        // Reuse an existing GitWatcher for this working directory, or create one.
+        let watcher: GitWatcher
+        if let existing = diffWatchers[workingDirectory] {
+            watcher = existing
+        } else {
+            watcher = GitWatcher(workingDirectory: workingDirectory)
+            diffWatchers[workingDirectory] = watcher
+        }
+
+        let diffPanel = DiffPanel(workspaceId: id, workingDirectory: workingDirectory, gitWatcher: watcher)
         panels[diffPanel.id] = diffPanel
         panelTitles[diffPanel.id] = diffPanel.displayTitle
 
@@ -8362,6 +8385,12 @@ final class Workspace: Identifiable, ObservableObject {
             PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
             panel.close()
         }
+
+        // Stop all shared GitWatchers since no panels remain.
+        for (_, watcher) in diffWatchers {
+            watcher.stop()
+        }
+        diffWatchers.removeAll(keepingCapacity: false)
 
         panels.removeAll(keepingCapacity: false)
         surfaceIdToPanelId.removeAll(keepingCapacity: false)
@@ -10837,6 +10866,9 @@ extension Workspace: BonsplitDelegate {
             panel?.close()
         }
 
+        // Capture diff panel working directory before removal for watcher cleanup.
+        let closedDiffWorkingDir = (panel as? DiffPanel)?.workingDirectory
+
         panels.removeValue(forKey: panelId)
         untrackRemoteTerminalSurface(panelId)
         pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
@@ -10854,6 +10886,10 @@ extension Workspace: BonsplitDelegate {
         surfaceTTYNames.removeValue(forKey: panelId)
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
         PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
+
+        if let closedDiffWorkingDir {
+            pruneUnusedDiffWatcher(workingDirectory: closedDiffWorkingDir)
+        }
         terminalInheritanceFontPointsByPanelId.removeValue(forKey: panelId)
         if lastTerminalConfigInheritancePanelId == panelId {
             lastTerminalConfigInheritancePanelId = nil
@@ -10989,6 +11025,14 @@ extension Workspace: BonsplitDelegate {
         let shouldScheduleFocusReconcile = !isDetachingCloseTransaction
 
         if !closedPanelIds.isEmpty {
+            // Collect diff panel working directories before removal for watcher cleanup.
+            var closedDiffWorkingDirs: [String] = []
+            for panelId in closedPanelIds {
+                if let diffPanel = panels[panelId] as? DiffPanel {
+                    closedDiffWorkingDirs.append(diffPanel.workingDirectory)
+                }
+            }
+
             for panelId in closedPanelIds {
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
@@ -11007,6 +11051,10 @@ extension Workspace: BonsplitDelegate {
                 surfaceListeningPorts.removeValue(forKey: panelId)
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
                 PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
+            }
+
+            for workingDir in closedDiffWorkingDirs {
+                pruneUnusedDiffWatcher(workingDirectory: workingDir)
             }
 
             let closedSet = Set(closedPanelIds)
