@@ -389,18 +389,16 @@ jobs:
           done
           [ -S "$SOCK" ] || { echo "Socket not ready at $SOCK" >&2; exit 1; }
 
-          # Wait for the app to finish initializing (first workspace/tab created)
-          for _ in {1..60}; do
-            if python3 -c "
-import sys, os; sys.path.insert(0, 'tests')
-from cmux import cmux, cmuxError
-try:
-    c = cmux(socket_path='$SOCK'); c.connect()
-    ws = c.list_workspaces(); c.close()
-    sys.exit(0 if ws else 1)
-except: sys.exit(1)
-"; then break; fi
-            sleep 0.5
+          # Wait for the app to finish initializing (first workspace/tab created).
+          # The socket appears before the first window/tab is ready on ephemeral runners.
+          echo "Waiting for app to create first workspace..."
+          for _attempt in {1..30}; do
+            REPLY=$(echo "list_workspaces" | nc -U "$SOCK" -w 2 2>/dev/null || true)
+            if echo "$REPLY" | grep -q "^[*0-9]"; then
+              echo "App ready"
+              break
+            fi
+            sleep 1
           done
 
           CMUX_SOCKET_PATH="$SOCK" \
