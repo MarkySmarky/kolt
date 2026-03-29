@@ -6,16 +6,22 @@
     "use strict";
 
     // State
-    let currentFiles = [];
-    let selectedFilePath = null;
-    let viewMode = "unified"; // "unified" or "split"
+    var currentUnstaged = [];
+    var currentStaged = [];
+    var selectedFilePath = null;
+    var selectedFileStaged = false;
+    var viewMode = "unified"; // "unified" or "split"
+
+    // Section collapse state (persists across updateFileList calls)
+    var stagedCollapsed = false;
+    var unstagedCollapsed = false;
 
     // DOM references
-    const fileListEl = document.getElementById("file-list");
-    const fileCountEl = document.getElementById("file-count");
-    const diffContentEl = document.getElementById("diff-content");
-    const diffFilenameEl = document.getElementById("diff-filename");
-    const toggleViewBtn = document.getElementById("toggle-view");
+    var fileListEl = document.getElementById("file-list");
+    var fileCountEl = document.getElementById("file-count");
+    var diffContentEl = document.getElementById("diff-content");
+    var diffFilenameEl = document.getElementById("diff-filename");
+    var toggleViewBtn = document.getElementById("toggle-view");
 
     // Toggle view mode
     toggleViewBtn.addEventListener("click", function () {
@@ -23,21 +29,35 @@
         toggleViewBtn.textContent = viewMode === "unified" ? "Unified" : "Side-by-side";
         // Re-render current diff if one is showing
         if (diffContentEl.querySelector(".diff-table")) {
-            const rawDiff = diffContentEl.dataset.rawDiff;
+            var rawDiff = diffContentEl.dataset.rawDiff;
             if (rawDiff) {
                 renderDiff(rawDiff);
             }
         }
     });
 
+    // Helper to post messages to Swift
+    function postMessage(msg) {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+            window.webkit.messageHandlers.diffPanel.postMessage(msg);
+        }
+    }
+
     // --- Public API called from Swift via evaluateJavaScript ---
 
     /**
      * Update the file list in the sidebar.
-     * @param {Array<{path: string, status: string, insertions: number, deletions: number}>} files
+     * @param {Object} data - { unstaged: [...], staged: [...] }
      */
-    window.updateFileList = function (files) {
-        currentFiles = files || [];
+    window.updateFileList = function (data) {
+        if (Array.isArray(data)) {
+            // Backwards compatibility: plain array means unstaged only
+            currentUnstaged = data || [];
+            currentStaged = [];
+        } else {
+            currentUnstaged = (data && data.unstaged) || [];
+            currentStaged = (data && data.staged) || [];
+        }
         renderFileList();
     };
 
@@ -58,8 +78,10 @@
      * Clear all state and reset the viewer.
      */
     window.clearAll = function () {
-        currentFiles = [];
+        currentUnstaged = [];
+        currentStaged = [];
         selectedFilePath = null;
+        selectedFileStaged = false;
         fileListEl.innerHTML = "";
         fileCountEl.textContent = "0 changed files";
         diffFilenameEl.textContent = "";
@@ -71,104 +93,213 @@
     function renderFileList() {
         fileListEl.innerHTML = "";
 
-        if (currentFiles.length === 0) {
+        var totalCount = currentUnstaged.length + currentStaged.length;
+
+        if (totalCount === 0) {
             fileCountEl.textContent = "0 changed files";
             fileListEl.innerHTML =
                 '<div class="no-changes">' +
                 '<span class="no-changes-icon">\u2713</span>' +
-                "<span>No unstaged changes</span>" +
+                "<span>No changes</span>" +
                 "</div>";
             return;
         }
 
-        var suffix = currentFiles.length === 1 ? " changed file" : " changed files";
-        fileCountEl.textContent = currentFiles.length + suffix;
+        var suffix = totalCount === 1 ? " changed file" : " changed files";
+        fileCountEl.textContent = totalCount + suffix;
 
-        // Header row with bulk actions
+        // Staged section
+        if (currentStaged.length > 0) {
+            renderSection(
+                "staged",
+                "Staged Changes",
+                currentStaged,
+                true,
+                stagedCollapsed
+            );
+        }
+
+        // Unstaged section
+        renderSection(
+            "unstaged",
+            "Changes",
+            currentUnstaged,
+            false,
+            unstagedCollapsed
+        );
+    }
+
+    function renderSection(sectionId, title, files, isStaged, isCollapsed) {
+        // Section header
         var header = document.createElement("div");
-        header.className = "files-header";
-        var headerTitle = document.createElement("span");
-        headerTitle.className = "files-title";
-        headerTitle.textContent = "Changes";
-        header.appendChild(headerTitle);
+        header.className = "section-header";
+        header.dataset.section = sectionId;
 
-        var headerActions = document.createElement("div");
-        headerActions.className = "files-header-actions";
+        var leftGroup = document.createElement("span");
 
-        var stageAllBtn = document.createElement("button");
-        stageAllBtn.className = "action-btn";
-        stageAllBtn.textContent = "Stage All";
-        stageAllBtn.title = "Stage All";
-        stageAllBtn.addEventListener("click", function (e) {
-            e.stopPropagation();
-            window.stageAll();
+        var toggle = document.createElement("span");
+        toggle.className = "section-toggle";
+        toggle.textContent = isCollapsed ? "\u25B8" : "\u25BE";
+        leftGroup.appendChild(toggle);
+
+        var titleSpan = document.createElement("span");
+        titleSpan.textContent = title + " ";
+        leftGroup.appendChild(titleSpan);
+
+        var countSpan = document.createElement("span");
+        countSpan.className = "section-count";
+        countSpan.textContent = "(" + files.length + ")";
+        leftGroup.appendChild(countSpan);
+
+        header.appendChild(leftGroup);
+
+        // Bulk action buttons
+        var actions = document.createElement("div");
+        actions.className = "section-actions";
+
+        if (isStaged) {
+            var unstageAllBtn = document.createElement("button");
+            unstageAllBtn.className = "action-btn";
+            unstageAllBtn.textContent = "\u2212All";
+            unstageAllBtn.title = "Unstage All";
+            unstageAllBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.unstageAll();
+            });
+            actions.appendChild(unstageAllBtn);
+        } else {
+            var stageAllBtn = document.createElement("button");
+            stageAllBtn.className = "action-btn";
+            stageAllBtn.textContent = "+All";
+            stageAllBtn.title = "Stage All";
+            stageAllBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.stageAll();
+            });
+            actions.appendChild(stageAllBtn);
+
+            var discardAllBtn = document.createElement("button");
+            discardAllBtn.className = "action-btn revert-btn";
+            discardAllBtn.textContent = "\u21A9All";
+            discardAllBtn.title = "Discard All";
+            discardAllBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.discardAll();
+            });
+            actions.appendChild(discardAllBtn);
+        }
+
+        header.appendChild(actions);
+
+        // Click header to toggle collapse
+        header.addEventListener("click", function () {
+            if (sectionId === "staged") {
+                stagedCollapsed = !stagedCollapsed;
+            } else {
+                unstagedCollapsed = !unstagedCollapsed;
+            }
+            renderFileList();
         });
-        headerActions.appendChild(stageAllBtn);
 
-        var revertAllBtn = document.createElement("button");
-        revertAllBtn.className = "action-btn";
-        revertAllBtn.textContent = "Revert All";
-        revertAllBtn.title = "Revert All";
-        revertAllBtn.addEventListener("click", function (e) {
-            e.stopPropagation();
-            window.revertAll();
-        });
-        headerActions.appendChild(revertAllBtn);
-
-        header.appendChild(headerActions);
         fileListEl.appendChild(header);
 
-        for (var i = 0; i < currentFiles.length; i++) {
-            var file = currentFiles[i];
-            var item = document.createElement("div");
-            item.className = "file-item";
-            if (file.path === selectedFilePath) {
-                item.classList.add("selected");
+        // Section content
+        var content = document.createElement("div");
+        content.className = "section-content";
+        if (isCollapsed) {
+            content.classList.add("collapsed");
+        }
+
+        if (files.length === 0 && !isStaged) {
+            var empty = document.createElement("div");
+            empty.className = "no-changes";
+            empty.style.padding = "12px";
+            empty.style.height = "auto";
+            var icon = document.createElement("span");
+            icon.className = "no-changes-icon";
+            icon.style.fontSize = "20px";
+            icon.textContent = "\u2713";
+            empty.appendChild(icon);
+            var msg = document.createElement("span");
+            msg.textContent = "No unstaged changes";
+            empty.appendChild(msg);
+            content.appendChild(empty);
+        }
+
+        for (var i = 0; i < files.length; i++) {
+            var file = files[i];
+            var item = createFileItem(file, isStaged);
+            content.appendChild(item);
+        }
+
+        fileListEl.appendChild(content);
+    }
+
+    function createFileItem(file, isStaged) {
+        var item = document.createElement("div");
+        item.className = "file-item";
+        if (file.path === selectedFilePath && isStaged === selectedFileStaged) {
+            item.classList.add("selected");
+        }
+        item.dataset.path = file.path;
+        item.dataset.staged = isStaged ? "true" : "false";
+
+        // Status badge
+        var badge = document.createElement("span");
+        badge.className = "status-badge status-" + file.status.charAt(0);
+        badge.textContent = file.status.charAt(0);
+        item.appendChild(badge);
+
+        // File name with directory
+        var nameEl = document.createElement("span");
+        nameEl.className = "file-name";
+        var parts = file.path.split("/");
+        if (parts.length > 1) {
+            var dirSpan = document.createElement("span");
+            dirSpan.className = "file-dir";
+            dirSpan.textContent = parts.slice(0, -1).join("/") + "/";
+            nameEl.appendChild(dirSpan);
+        }
+        nameEl.appendChild(document.createTextNode(parts[parts.length - 1]));
+        item.appendChild(nameEl);
+
+        // Stats
+        if (file.insertions > 0 || file.deletions > 0) {
+            var stats = document.createElement("span");
+            stats.className = "file-stats";
+            if (file.insertions > 0) {
+                var addSpan = document.createElement("span");
+                addSpan.className = "stat-add";
+                addSpan.textContent = "+" + file.insertions;
+                stats.appendChild(addSpan);
             }
-            item.dataset.path = file.path;
-
-            // Status badge
-            var badge = document.createElement("span");
-            badge.className = "status-badge status-" + file.status.charAt(0);
-            badge.textContent = file.status.charAt(0);
-            item.appendChild(badge);
-
-            // File name with directory
-            var nameEl = document.createElement("span");
-            nameEl.className = "file-name";
-            var parts = file.path.split("/");
-            if (parts.length > 1) {
-                var dirSpan = document.createElement("span");
-                dirSpan.className = "file-dir";
-                dirSpan.textContent = parts.slice(0, -1).join("/") + "/";
-                nameEl.appendChild(dirSpan);
+            if (file.deletions > 0) {
+                var delSpan = document.createElement("span");
+                delSpan.className = "stat-del";
+                delSpan.textContent = "-" + file.deletions;
+                stats.appendChild(delSpan);
             }
-            nameEl.appendChild(document.createTextNode(parts[parts.length - 1]));
-            item.appendChild(nameEl);
+            item.appendChild(stats);
+        }
 
-            // Stats
-            if (file.insertions > 0 || file.deletions > 0) {
-                var stats = document.createElement("span");
-                stats.className = "file-stats";
-                if (file.insertions > 0) {
-                    var addSpan = document.createElement("span");
-                    addSpan.className = "stat-add";
-                    addSpan.textContent = "+" + file.insertions;
-                    stats.appendChild(addSpan);
-                }
-                if (file.deletions > 0) {
-                    var delSpan = document.createElement("span");
-                    delSpan.className = "stat-del";
-                    delSpan.textContent = "-" + file.deletions;
-                    stats.appendChild(delSpan);
-                }
-                item.appendChild(stats);
-            }
+        // Action buttons
+        var actions = document.createElement("div");
+        actions.className = "file-actions";
 
-            // Action buttons (stage/revert per file)
-            var actions = document.createElement("div");
-            actions.className = "file-actions";
-
+        if (isStaged) {
+            // Staged file: unstage button
+            var unstageBtn = document.createElement("button");
+            unstageBtn.className = "action-btn unstage-btn";
+            unstageBtn.textContent = "\u2212";
+            unstageBtn.title = "Unstage";
+            unstageBtn.dataset.filePath = file.path;
+            unstageBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.unstageFile(this.dataset.filePath);
+            });
+            actions.appendChild(unstageBtn);
+        } else {
+            // Unstaged file: stage + discard buttons
             var stageBtn = document.createElement("button");
             stageBtn.className = "action-btn stage-btn";
             stageBtn.textContent = "+";
@@ -180,52 +311,49 @@
             });
             actions.appendChild(stageBtn);
 
-            var revertBtn = document.createElement("button");
-            revertBtn.className = "action-btn revert-btn";
-            revertBtn.textContent = "\u21A9";
-            revertBtn.title = "Revert";
-            revertBtn.dataset.filePath = file.path;
-            revertBtn.addEventListener("click", function (e) {
+            var discardBtn = document.createElement("button");
+            discardBtn.className = "action-btn revert-btn";
+            discardBtn.textContent = "\u21A9";
+            discardBtn.title = "Discard";
+            discardBtn.dataset.filePath = file.path;
+            discardBtn.addEventListener("click", function (e) {
                 e.stopPropagation();
-                window.revertFile(this.dataset.filePath);
+                window.discardFile(this.dataset.filePath);
             });
-            actions.appendChild(revertBtn);
-
-            item.appendChild(actions);
-
-            item.addEventListener("click", onFileClick);
-            fileListEl.appendChild(item);
+            actions.appendChild(discardBtn);
         }
-    }
 
-    function onFileClick(event) {
-        var item = event.currentTarget;
-        var path = item.dataset.path;
+        item.appendChild(actions);
 
-        // Update selection
-        selectedFilePath = path;
-        var items = fileListEl.querySelectorAll(".file-item");
-        for (var j = 0; j < items.length; j++) {
-            items[j].classList.remove("selected");
-        }
-        item.classList.add("selected");
+        // Click to select file
+        item.addEventListener("click", function () {
+            var path = this.dataset.path;
+            var staged = this.dataset.staged === "true";
 
-        // Update toolbar filename
-        diffFilenameEl.textContent = path;
+            selectedFilePath = path;
+            selectedFileStaged = staged;
 
-        // Show loading state
-        diffContentEl.innerHTML =
-            '<div id="diff-placeholder">' +
-            '<span class="placeholder-text">Loading diff\u2026</span>' +
-            "</div>";
+            // Update selection highlight across all items
+            var allItems = fileListEl.querySelectorAll(".file-item");
+            for (var j = 0; j < allItems.length; j++) {
+                allItems[j].classList.remove("selected");
+            }
+            this.classList.add("selected");
 
-        // Request diff from Swift
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-            window.webkit.messageHandlers.diffPanel.postMessage({
-                action: "selectFile",
-                path: path,
-            });
-        }
+            // Update toolbar filename
+            diffFilenameEl.textContent = path;
+
+            // Show loading state
+            diffContentEl.innerHTML =
+                '<div id="diff-placeholder">' +
+                '<span class="placeholder-text">Loading diff\u2026</span>' +
+                "</div>";
+
+            // Request diff from Swift
+            postMessage({ action: "selectFile", path: path, staged: staged });
+        });
+
+        return item;
     }
 
     function showPlaceholder(message) {
@@ -537,41 +665,66 @@
     // --- Git Actions ---
 
     window.stageFile = function (path) {
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-            window.webkit.messageHandlers.diffPanel.postMessage({ action: "stageFile", path: path });
-        }
+        postMessage({ action: "stageFile", path: path });
     };
 
     window.unstageFile = function (path) {
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-            window.webkit.messageHandlers.diffPanel.postMessage({ action: "unstageFile", path: path });
-        }
+        postMessage({ action: "unstageFile", path: path });
     };
 
-    window.revertFile = function (path) {
-        if (confirm("Revert changes to " + path + "?")) {
-            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-                window.webkit.messageHandlers.diffPanel.postMessage({ action: "revertFile", path: path });
-            }
+    window.unstageAll = function () {
+        postMessage({ action: "unstageAll" });
+    };
+
+    window.discardFile = function (path) {
+        if (confirm("Discard changes to " + path + "?")) {
+            postMessage({ action: "revertFile", path: path });
         }
     };
 
     window.stageAll = function () {
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-            window.webkit.messageHandlers.diffPanel.postMessage({ action: "stageAll" });
+        postMessage({ action: "stageAll" });
+    };
+
+    window.discardAll = function () {
+        if (confirm("Discard ALL changes? This cannot be undone.")) {
+            postMessage({ action: "revertAll" });
         }
     };
 
-    window.revertAll = function () {
-        if (confirm("Revert ALL changes?")) {
-            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-                window.webkit.messageHandlers.diffPanel.postMessage({ action: "revertAll" });
-            }
-        }
-    };
+    // Keep backwards compat aliases
+    window.revertFile = window.discardFile;
+    window.revertAll = window.discardAll;
+
+    // --- Resizable divider ---
+    (function () {
+        var divider = document.getElementById("divider");
+        var fileTree = document.getElementById("file-tree");
+        var isDragging = false;
+
+        divider.addEventListener("mousedown", function (e) {
+            isDragging = true;
+            divider.classList.add("dragging");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            e.preventDefault();
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!isDragging) return;
+            var newWidth = Math.max(150, Math.min(500, e.clientX));
+            fileTree.style.width = newWidth + "px";
+        });
+
+        document.addEventListener("mouseup", function () {
+            if (!isDragging) return;
+            isDragging = false;
+            divider.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+        });
+    })();
 
     // Notify Swift that the page is ready
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
-        window.webkit.messageHandlers.diffPanel.postMessage({ action: "ready" });
-    }
+    postMessage({ action: "ready" });
 })();

@@ -38,6 +38,8 @@
 		K0LT0004 /* DiffPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0003 /* DiffPanel.swift */; };
 		K0LT0006 /* DiffPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0005 /* DiffPanelView.swift */; };
 		K0LT0008 /* WorktreeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0007 /* WorktreeManager.swift */; };
+		K0LT0011 /* diff-viewer in Resources */ = {isa = PBXBuildFile; fileRef = K0LT0010 /* diff-viewer */; };
+		K0LT0010 /* diff-viewer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "diff-viewer"; path = "web/diff-viewer"; sourceTree = SOURCE_ROOT; };
 		A5001290 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = A5001291 /* MarkdownUI */; };
 		A5001405 /* PanelContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001415 /* PanelContentView.swift */; };
 		A5001406 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001416 /* Workspace.swift */; };
@@ -259,7 +261,7 @@
 		B8F266276A1A3D9A45BD840F /* DisplayResolutionRegressionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayResolutionRegressionUITests.swift; sourceTree = "<group>"; };
 		C0B4D9B1A1B2C3D4E5F60718 /* UpdatePillUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatePillUITests.swift; sourceTree = "<group>"; };
 		A5001101 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		IC000002 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder; path = AppIcon.icon; sourceTree = "<group>"; };
+
 		B2E7294509CC42FE9191870E /* xterm-ghostty */ = {isa = PBXFileReference; lastKnownFileType = file; path = "ghostty/terminfo/78/xterm-ghostty"; sourceTree = "<group>"; };
 		C1ADE00001A1B2C3D4E5F719 /* claude */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Resources/bin/claude"; sourceTree = SOURCE_ROOT; };
 		D1BEF00001A1B2C3D4E5F719 /* open */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Resources/bin/open"; sourceTree = SOURCE_ROOT; };
@@ -360,6 +362,7 @@
 				DA7A10CA710E000000000003 /* Localizable.xcstrings in Resources */,
 				DA7A10CA710E000000000004 /* InfoPlist.xcstrings in Resources */,
 				A5001623 /* cmux.sdef in Resources */,
+				K0LT0011 /* diff-viewer in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,7 +410,7 @@
 				B9000003A1B2C3D4E5F60719 /* CLI */,
 				087C454FFF74443AB06942C3 /* Resources */,
 				A5001101 /* Assets.xcassets */,
-				IC000002 /* AppIcon.icon */,
+
 				A5001016 /* GhosttyKit.xcframework */,
 				A5001017 /* ghostty.h */,
 				A5001018 /* cmux-Bridging-Header.h */,
@@ -446,6 +449,7 @@
 				A5001090 /* AppDelegate.swift */,
 					K0LT0001 /* GitWatcher.swift */,
 					K0LT0007 /* WorktreeManager.swift */,
+					K0LT0010 /* diff-viewer */,
 				A5001091 /* NotificationsPage.swift */,
 				A5001092 /* TerminalNotificationStore.swift */,
 				A5001301 /* SurfaceSearchOverlay.swift */,
@@ -971,8 +975,8 @@
 					"-framework",
 					Carbon,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.cmuxterm.app.debug;
-				PRODUCT_NAME = "cmux DEV";
+				PRODUCT_BUNDLE_IDENTIFIER = com.koltterm.app.debug;
+				PRODUCT_NAME = "Kolt DEV";
 				SPARKLE_PUBLIC_KEY = "avjcgKibf1FTvhIjLBxhd+0HSpsXU4D0IGlVk8cgqRc=";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "cmux-Bridging-Header.h";
@@ -1011,8 +1015,8 @@
 					Carbon,
 				);
 				ONLY_ACTIVE_ARCH = NO;
-				PRODUCT_BUNDLE_IDENTIFIER = com.cmuxterm.app;
-				PRODUCT_NAME = cmux;
+				PRODUCT_BUNDLE_IDENTIFIER = com.koltterm.app;
+				PRODUCT_NAME = Kolt;
 				SPARKLE_PUBLIC_KEY = "avjcgKibf1FTvhIjLBxhd+0HSpsXU4D0IGlVk8cgqRc=";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "cmux-Bridging-Header.h";

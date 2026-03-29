@@ -14,8 +14,14 @@ struct ChangedFile: Equatable, Sendable {
 /// Monitors `.git/index` for staging area changes and runs `git diff` to detect modifications.
 final class GitWatcher: ObservableObject {
 
-    /// Files that have changed relative to the git index.
-    @Published private(set) var changedFiles: [ChangedFile] = []
+    /// Files with unstaged changes (working tree vs index).
+    @Published private(set) var unstagedFiles: [ChangedFile] = []
+
+    /// Files with staged changes (index vs HEAD).
+    @Published private(set) var stagedFiles: [ChangedFile] = []
+
+    /// Backwards-compatible accessor — returns unstaged files.
+    var changedFiles: [ChangedFile] { unstagedFiles }
 
     /// Raw unified diff output for the currently selected file.
     @Published private(set) var currentDiff: String = ""
@@ -50,10 +56,13 @@ final class GitWatcher: ObservableObject {
     // MARK: - Public API
 
     /// Select a specific file to view its diff.
-    func selectFile(_ path: String) {
+    /// - Parameters:
+    ///   - path: The file path relative to the working directory.
+    ///   - staged: When `true`, shows the staged (cached) diff; otherwise the unstaged diff.
+    func selectFile(_ path: String, staged: Bool) {
         gitQueue.async { [weak self] in
             guard let self else { return }
-            let diff = self.runGitDiff(forFile: path)
+            let diff = self.runGitDiff(forFile: path, staged: staged)
             DispatchQueue.main.async {
                 self.currentDiff = diff
             }
@@ -80,13 +89,7 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self else { return }
             _ = self.runGitCommand(["add", "--", path])
-            let files = self.runGitDiffNameStatus()
-            let branch = self.runGitBranchName()
-            DispatchQueue.main.async {
-                self.changedFiles = files
-                self.branchName = branch
-                completion(true)
-            }
+            self.refreshBothLists(completion: completion)
         }
     }
 
@@ -95,13 +98,7 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self else { return }
             _ = self.runGitCommand(["reset", "HEAD", "--", path])
-            let files = self.runGitDiffNameStatus()
-            let branch = self.runGitBranchName()
-            DispatchQueue.main.async {
-                self.changedFiles = files
-                self.branchName = branch
-                completion(true)
-            }
+            self.refreshBothLists(completion: completion)
         }
     }
 
@@ -110,13 +107,7 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self else { return }
             _ = self.runGitCommand(["checkout", "--", path])
-            let files = self.runGitDiffNameStatus()
-            let branch = self.runGitBranchName()
-            DispatchQueue.main.async {
-                self.changedFiles = files
-                self.branchName = branch
-                completion(true)
-            }
+            self.refreshBothLists(completion: completion)
         }
     }
 
@@ -125,13 +116,16 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self else { return }
             _ = self.runGitCommand(["add", "-A"])
-            let files = self.runGitDiffNameStatus()
-            let branch = self.runGitBranchName()
-            DispatchQueue.main.async {
-                self.changedFiles = files
-                self.branchName = branch
-                completion(true)
-            }
+            self.refreshBothLists(completion: completion)
+        }
+    }
+
+    /// Unstage all files: `git reset HEAD`
+    func unstageAll(completion: @escaping (Bool) -> Void) {
+        gitQueue.async { [weak self] in
+            guard let self else { return }
+            _ = self.runGitCommand(["reset", "HEAD"])
+            self.refreshBothLists(completion: completion)
         }
     }
 
@@ -140,13 +134,7 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self else { return }
             _ = self.runGitCommand(["checkout", "--", "."])
-            let files = self.runGitDiffNameStatus()
-            let branch = self.runGitBranchName()
-            DispatchQueue.main.async {
-                self.changedFiles = files
-                self.branchName = branch
-                completion(true)
-            }
+            self.refreshBothLists(completion: completion)
         }
     }
 
@@ -221,20 +209,45 @@ final class GitWatcher: ObservableObject {
         gitQueue.async { [weak self] in
             guard let self, !self.isClosed else { return }
 
-            let files = self.runGitDiffNameStatus()
+            let unstaged = self.runGitDiffNameStatus(staged: false)
+            let staged = self.runGitDiffNameStatus(staged: true)
             let branch = self.runGitBranchName()
 
             DispatchQueue.main.async {
-                self.changedFiles = files
+                self.unstagedFiles = unstaged
+                self.stagedFiles = staged
                 self.branchName = branch
             }
         }
     }
 
+    /// Shared helper used by action methods to refresh both lists after a mutation.
+    /// Must be called on `gitQueue`.
+    private func refreshBothLists(completion: @escaping (Bool) -> Void) {
+        let unstaged = runGitDiffNameStatus(staged: false)
+        let staged = runGitDiffNameStatus(staged: true)
+        let branch = runGitBranchName()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.unstagedFiles = unstaged
+            self.stagedFiles = staged
+            self.branchName = branch
+            completion(true)
+        }
+    }
+
     /// Runs `git diff --name-status` and `git diff --numstat` to gather changed file info.
-    private func runGitDiffNameStatus() -> [ChangedFile] {
-        let nameStatusOutput = runGitCommand(["diff", "--name-status"])
-        let numStatOutput = runGitCommand(["diff", "--numstat"])
+    /// - Parameter staged: When `true`, queries the staging area (`--cached`).
+    private func runGitDiffNameStatus(staged: Bool) -> [ChangedFile] {
+        var nameStatusArgs = ["diff", "--name-status"]
+        var numStatArgs = ["diff", "--numstat"]
+        if staged {
+            nameStatusArgs.insert("--cached", at: 1)
+            numStatArgs.insert("--cached", at: 1)
+        }
+
+        let nameStatusOutput = runGitCommand(nameStatusArgs)
+        let numStatOutput = runGitCommand(numStatArgs)
 
         // Parse numstat for insertions/deletions per file.
         var statsByPath: [String: (insertions: Int, deletions: Int)] = [:]
@@ -266,8 +279,16 @@ final class GitWatcher: ObservableObject {
     }
 
     /// Runs `git diff <file>` for a specific file and returns the unified diff output.
-    private func runGitDiff(forFile path: String) -> String {
-        runGitCommand(["diff", "--", path])
+    /// - Parameters:
+    ///   - path: The file path relative to the working directory.
+    ///   - staged: When `true`, shows the staged (cached) diff.
+    private func runGitDiff(forFile path: String, staged: Bool) -> String {
+        var args = ["diff"]
+        if staged {
+            args.append("--cached")
+        }
+        args.append(contentsOf: ["--", path])
+        return runGitCommand(args)
     }
 
     /// Runs `git rev-parse --abbrev-ref HEAD` to get the current branch name.
