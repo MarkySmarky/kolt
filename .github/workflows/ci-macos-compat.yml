@@ -8,20 +8,8 @@ on:
 
 jobs:
   compat-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: warp-macos-15-arm64-6x
-            timeout: 30
-            smoke: true
-            skip_zig: false
-          - os: warp-macos-26-arm64-6x
-            timeout: 30
-            smoke: false
-            skip_zig: true  # zig 0.15.2 MachO linker can't resolve libSystem on macOS 26
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -66,7 +54,6 @@ jobs:
           ./scripts/download-prebuilt-ghosttykit.sh
 
       - name: Install zig
-        if: ${{ !matrix.skip_zig }}
         run: |
           ZIG_REQUIRED="0.15.2"
           if command -v zig >/dev/null 2>&1 && zig version 2>/dev/null | grep -q "^${ZIG_REQUIRED}"; then
@@ -86,17 +73,17 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
         with:
           path: ~/Library/Developer/Xcode/DerivedData/GhosttyTabs-*
-          key: deriveddata-${{ matrix.os }}-${{ env.XCODE_VER }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.pbxproj') }}
+          key: deriveddata-macos-15-${{ env.XCODE_VER }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.pbxproj') }}
           restore-keys: |
-            deriveddata-${{ matrix.os }}-${{ env.XCODE_VER }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}-
-            deriveddata-${{ matrix.os }}-${{ env.XCODE_VER }}-
+            deriveddata-macos-15-${{ env.XCODE_VER }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}-
+            deriveddata-macos-15-${{ env.XCODE_VER }}-
 
       - name: Cache Swift packages
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
         with:
           path: .ci-source-packages
-          key: spm-${{ matrix.os }}-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-          restore-keys: spm-${{ matrix.os }}-
+          key: spm-macos-15-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-macos-15-
 
       - name: Resolve Swift packages
         run: |
@@ -119,8 +106,6 @@ jobs:
           done
 
       - name: Run unit tests
-        env:
-          CMUX_SKIP_ZIG_BUILD: ${{ matrix.skip_zig && '1' || '0' }}
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
@@ -164,7 +149,6 @@ jobs:
           fi
 
       - name: Create virtual display
-        if: matrix.smoke
         run: |
           set -euo pipefail
           echo "=== Display before ==="
@@ -180,7 +164,6 @@ jobs:
           system_profiler SPDisplaysDataType 2>/dev/null || echo "(no display info)"
 
       - name: Build app for smoke test
-        if: matrix.smoke
         run: |
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
@@ -190,7 +173,6 @@ jobs:
             -destination "platform=macOS" build
 
       - name: Smoke test
-        if: matrix.smoke
         run: |
           set -euo pipefail
           chmod +x scripts/smoke-test-ci.sh
