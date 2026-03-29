@@ -190,12 +190,15 @@ final class DiffPanel: Panel, ObservableObject {
     // MARK: - Private
 
     private func subscribeToGitWatcher() {
-        gitWatcher.$changedFiles
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] files in
-                self?.handleChangedFilesUpdate(files)
-            }
-            .store(in: &cancellables)
+        Publishers.CombineLatest(
+            gitWatcher.$unstagedFiles,
+            gitWatcher.$stagedFiles
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] unstaged, staged in
+            self?.handleFilesUpdate(unstaged: unstaged, staged: staged)
+        }
+        .store(in: &cancellables)
 
         gitWatcher.$currentDiff
             .receive(on: DispatchQueue.main)
@@ -219,8 +222,8 @@ final class DiffPanel: Panel, ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func handleChangedFilesUpdate(_ files: [ChangedFile]) {
-        let jsonArray = files.map { file -> [String: Any] in
+    private func handleFilesUpdate(unstaged: [ChangedFile], staged: [ChangedFile]) {
+        let mapFile: (ChangedFile) -> [String: Any] = { file in
             [
                 "path": file.path,
                 "status": file.status,
@@ -229,7 +232,12 @@ final class DiffPanel: Panel, ObservableObject {
             ]
         }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: jsonArray),
+        let combined: [String: Any] = [
+            "unstaged": unstaged.map(mapFile),
+            "staged": staged.map(mapFile)
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: combined),
               let jsonString = String(data: data, encoding: .utf8) else {
             return
         }
@@ -306,7 +314,8 @@ final class DiffPanel: Panel, ObservableObject {
         switch action {
         case "selectFile":
             if let path = body["path"] as? String {
-                gitWatcher.selectFile(path)
+                let isStaged = (body["staged"] as? Bool) ?? false
+                gitWatcher.selectFile(path, staged: isStaged)
             }
         case "ready":
             webViewDidFinishLoading()
@@ -330,6 +339,10 @@ final class DiffPanel: Panel, ObservableObject {
             }
         case "stageAll":
             gitWatcher.stageAll { [weak self] _ in
+                self?.gitWatcher.refresh()
+            }
+        case "unstageAll":
+            gitWatcher.unstageAll { [weak self] _ in
                 self?.gitWatcher.refresh()
             }
         case "revertAll":

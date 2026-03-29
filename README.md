@@ -271,3 +271,4 @@ cmux is free, open source, and always will be. If you'd like to support developm
 cmux is open source under [AGPL-3.0-or-later](LICENSE).
 
 If your organization cannot comply with AGPL, a commercial license is available. Contact [founders@manaflow.com](mailto:founders@manaflow.com) for details.
+test change
