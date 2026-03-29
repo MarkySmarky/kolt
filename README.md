@@ -6,9 +6,9 @@ Built on Ghostty (libghostty), Swift/AppKit, macOS 14+.
 
 ## What's added
 
-**DiffPanel** (`Cmd+Shift+K`) — VS Code-style source control panel as a split pane. Staged/unstaged sections, per-file stage/discard actions, resizable file tree, live-updating diffs via FSEvents.
+**DiffPanel** (`Cmd+Shift+K`) — VS Code-style source control panel as a split pane. Staged/unstaged sections with per-file stage/discard actions, resizable file tree, live-updating diffs via FSEvents.
 
-**Worktree Management** — Create, switch, and delete git worktrees from the sidebar context menu or `Cmd+Shift+G`. Each worktree opens as its own workspace.
+**Worktree Management** (`Cmd+N`) — New Workspace dialog with three modes: new branch (from any base), existing branch, or empty workspace. Worktrees are created behind the scenes. Sidebar WORKTREES section shows all active worktrees with merged/stale detection and inline delete.
 
 **CI Status** — GitHub Actions status in the sidebar per workspace. Polls via `gh` CLI, integrates with existing PR status. Click to open the Actions run.
 
