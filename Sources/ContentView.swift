@@ -8511,6 +8511,9 @@ struct VerticalTabsSidebar: View {
     @StateObject private var dragFailsafeMonitor = SidebarDragFailsafeMonitor()
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
+    @State private var sidebarWorktrees: [WorktreeManager.WorktreeInfo] = []
+    @State private var worktreesSectionCollapsed: Bool = false
+    @State private var isWorkspaceCreationSheetPresented: Bool = false
     @AppStorage(SidebarWorkspaceDetailSettings.hideAllDetailsKey)
     private var sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
     @AppStorage(SidebarWorkspaceDetailSettings.showNotificationMessageKey)
@@ -8613,6 +8616,8 @@ struct VerticalTabsSidebar: View {
                         }
                         .padding(.vertical, 8)
 
+                        worktreesSidebarSection()
+
                         SidebarEmptyArea(
                             rowSpacing: tabRowSpacing,
                             selection: $selection,
@@ -8676,6 +8681,10 @@ struct VerticalTabsSidebar: View {
                 tabId: nil,
                 reason: "sidebar_appear"
             )
+            refreshWorktreeList()
+        }
+        .onChange(of: tabManager.selectedTabId) { _ in
+            refreshWorktreeList()
         }
         .onDisappear {
             modifierKeyMonitor.stop()
@@ -8720,6 +8729,244 @@ struct VerticalTabsSidebar: View {
     private func debugShortSidebarTabId(_ id: UUID?) -> String {
         guard let id else { return "nil" }
         return String(id.uuidString.prefix(5))
+    }
+
+    // MARK: - Worktrees Sidebar Section
+
+    @ViewBuilder
+    private func worktreesSidebarSection() -> some View {
+        if !sidebarWorktrees.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider()
+                    .padding(.vertical, 4)
+
+                HStack {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            worktreesSectionCollapsed.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: worktreesSectionCollapsed ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Text(String(
+                                localized: "sidebar.worktrees.header",
+                                defaultValue: "WORKTREES"
+                            ))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Button {
+                        AppDelegate.shared?.presentWorkspaceCreationSheet()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .safeHelp(String(
+                        localized: "sidebar.worktrees.addTooltip",
+                        defaultValue: "New Workspace"
+                    ))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+
+                if !worktreesSectionCollapsed {
+                    LazyVStack(spacing: 1) {
+                        ForEach(sidebarWorktrees, id: \.path) { worktree in
+                            worktreeRow(worktree)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeRow(_ worktree: WorktreeManager.WorktreeInfo) -> some View {
+        let isCurrentWorktree = tabManager.selectedWorkspace?.worktreeInfo?.path == worktree.path
+        let abbreviatedPath = abbreviateWorktreePath(worktree.path)
+
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isCurrentWorktree ? .accentColor : .secondary)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(worktree.branch)
+                    .font(.system(size: 11, weight: isCurrentWorktree ? .semibold : .regular))
+                    .foregroundColor(isCurrentWorktree ? .primary : .secondary)
+                    .lineLimit(1)
+                Text(abbreviatedPath)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if worktree.isMain {
+                Text(String(localized: "sidebar.worktrees.main", defaultValue: "main"))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(isCurrentWorktree ? Color.accentColor.opacity(0.12) : Color.clear)
+        .cornerRadius(4)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            switchToWorktree(worktree)
+        }
+        .contextMenu {
+            if !worktree.isMain {
+                Button(String(
+                    localized: "contextMenu.deleteWorktree",
+                    defaultValue: "Delete Worktree"
+                )) {
+                    sidebarDeleteWorktree(worktree)
+                }
+            }
+        }
+    }
+
+    private func abbreviateWorktreePath(_ path: String) -> String {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix(homeDir) {
+            return "~" + path.dropFirst(homeDir.count)
+        }
+        return path
+    }
+
+    private func switchToWorktree(_ worktree: WorktreeManager.WorktreeInfo) {
+        let normalizedPath = URL(fileURLWithPath: worktree.path).standardizedFileURL.path
+        // Check if a workspace already exists for this worktree
+        if let existing = tabManager.tabs.first(where: {
+            URL(fileURLWithPath: $0.currentDirectory).standardizedFileURL.path == normalizedPath
+        }) {
+            tabManager.selectedTabId = existing.id
+            return
+        }
+        // Create a new workspace for this worktree
+        let newWorkspace = tabManager.addWorkspace(
+            title: worktree.branch,
+            workingDirectory: worktree.path,
+            select: true
+        )
+        newWorkspace.attachWorktree(worktree)
+    }
+
+    private func sidebarDeleteWorktree(_ worktree: WorktreeManager.WorktreeInfo) {
+        let alert = NSAlert()
+        alert.messageText = String(
+            localized: "worktree.delete.title",
+            defaultValue: "Delete Worktree"
+        )
+        alert.informativeText = String(
+            localized: "worktree.delete.message",
+            defaultValue: "Are you sure you want to delete the worktree for branch '\(worktree.branch)'?"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "common.delete", defaultValue: "Delete"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard let currentDir = tabManager.selectedWorkspace?.currentDirectory else { return }
+        let worktreeManager = WorktreeManager()
+
+        Task { @MainActor in
+            do {
+                try await worktreeManager.remove(path: worktree.path, force: false, workingDirectory: currentDir)
+                // Detach any workspace that was using this worktree
+                for workspace in tabManager.tabs where workspace.worktreeInfo?.path == worktree.path {
+                    workspace.detachWorktree()
+                }
+                refreshWorktreeList()
+            } catch {
+                #if DEBUG
+                dlog("sidebar.worktree.delete.error \(error.localizedDescription)")
+                #endif
+                if case WorktreeManager.WorktreeError.uncommittedChanges = error {
+                    let forceAlert = NSAlert()
+                    forceAlert.messageText = String(
+                        localized: "worktree.delete.uncommitted.title",
+                        defaultValue: "Uncommitted Changes"
+                    )
+                    forceAlert.informativeText = String(
+                        localized: "worktree.delete.uncommitted.message",
+                        defaultValue: "The worktree has uncommitted changes. Force delete?"
+                    )
+                    forceAlert.alertStyle = .critical
+                    forceAlert.addButton(withTitle: String(
+                        localized: "common.forceDelete",
+                        defaultValue: "Force Delete"
+                    ))
+                    forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+                    guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                    do {
+                        try await worktreeManager.remove(path: worktree.path, force: true, workingDirectory: currentDir)
+                        for workspace in tabManager.tabs where workspace.worktreeInfo?.path == worktree.path {
+                            workspace.detachWorktree()
+                        }
+                        refreshWorktreeList()
+                    } catch {
+                        let failAlert = NSAlert()
+                        failAlert.messageText = String(
+                            localized: "worktree.delete.errorTitle",
+                            defaultValue: "Worktree Deletion Failed"
+                        )
+                        failAlert.informativeText = error.localizedDescription
+                        failAlert.alertStyle = .warning
+                        failAlert.runModal()
+                    }
+                } else {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = String(
+                        localized: "worktree.delete.errorTitle",
+                        defaultValue: "Worktree Deletion Failed"
+                    )
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .warning
+                    errorAlert.runModal()
+                }
+            }
+        }
+    }
+
+    private func refreshWorktreeList() {
+        guard let workspace = tabManager.selectedWorkspace else {
+            sidebarWorktrees = []
+            return
+        }
+        let currentDir = workspace.currentDirectory
+        guard !currentDir.isEmpty else {
+            sidebarWorktrees = []
+            return
+        }
+        Task { @MainActor in
+            do {
+                let worktreeManager = WorktreeManager()
+                let worktrees = try await worktreeManager.list(workingDirectory: currentDir)
+                // Only show the section if there are multiple worktrees (more than just the main one)
+                sidebarWorktrees = worktrees.count > 1 ? worktrees : []
+            } catch {
+                #if DEBUG
+                dlog("sidebar.worktrees.refresh.error \(error.localizedDescription)")
+                #endif
+                sidebarWorktrees = []
+            }
+        }
     }
 }
 
@@ -11873,65 +12120,6 @@ private struct TabItemView: View, Equatable {
         }
         .disabled(!hasReadNotifications(in: targetIds))
 
-        worktreeContextMenuItems(for: tab)
-    }
-
-    @ViewBuilder
-    private func worktreeContextMenuItems(for workspace: Workspace) -> some View {
-        Divider()
-        Button(String(localized: "contextMenu.createWorktree", defaultValue: "Create Worktree…")) {
-            promptCreateWorktree(for: workspace)
-        }
-        if workspace.worktreeInfo != nil {
-            Button(String(localized: "contextMenu.deleteWorktree", defaultValue: "Delete Worktree")) {
-                promptDeleteWorktree(for: workspace)
-            }
-        }
-    }
-
-    private func promptCreateWorktree(for workspace: Workspace) {
-        let alert = NSAlert()
-        alert.messageText = String(localized: "worktree.create.title", defaultValue: "Create Worktree")
-        alert.informativeText = String(localized: "worktree.create.message", defaultValue: "Enter the branch name for the new worktree:")
-        alert.addButton(withTitle: String(localized: "common.create", defaultValue: "Create"))
-        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
-
-        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        inputField.placeholderString = String(localized: "worktree.create.placeholder", defaultValue: "feature/my-branch")
-        alert.accessoryView = inputField
-        alert.window.initialFirstResponder = inputField
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let branchName = inputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !branchName.isEmpty else { return }
-
-        Task {
-            do {
-                let info = try await workspace.createWorktree(
-                    branch: branchName,
-                    baseBranch: nil,
-                    directory: nil
-                )
-                // Create a new workspace for the worktree
-                if let tabMgr = workspace.owningTabManager {
-                    let newWorkspace = tabMgr.addWorkspace(
-                        title: branchName,
-                        workingDirectory: info.path,
-                        select: true
-                    )
-                    newWorkspace.attachWorktree(info)
-                }
-            } catch {
-                #if DEBUG
-                dlog("worktree.create.error \(error.localizedDescription)")
-                #endif
-                let errorAlert = NSAlert()
-                errorAlert.messageText = String(localized: "worktree.create.errorTitle", defaultValue: "Worktree Creation Failed")
-                errorAlert.informativeText = error.localizedDescription
-                errorAlert.alertStyle = .warning
-                errorAlert.runModal()
-            }
-        }
     }
 
     private func promptDeleteWorktree(for workspace: Workspace) {

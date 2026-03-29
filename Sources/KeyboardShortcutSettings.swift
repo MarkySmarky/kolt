@@ -42,9 +42,6 @@ enum KeyboardShortcutSettings {
         case splitBrowserRight
         case splitBrowserDown
 
-        // Worktrees
-        case createWorktree
-
         // Panels
         case toggleDiffPanel
         case openBrowser
@@ -84,7 +81,6 @@ enum KeyboardShortcutSettings {
             case .toggleSplitZoom: return String(localized: "shortcut.togglePaneZoom.label", defaultValue: "Toggle Pane Zoom")
             case .splitBrowserRight: return String(localized: "shortcut.splitBrowserRight.label", defaultValue: "Split Browser Right")
             case .splitBrowserDown: return String(localized: "shortcut.splitBrowserDown.label", defaultValue: "Split Browser Down")
-            case .createWorktree: return String(localized: "shortcut.createWorktree.label", defaultValue: "Create Worktree")
             case .toggleDiffPanel: return String(localized: "shortcut.toggleDiffPanel.label", defaultValue: "Toggle Diff Panel")
             case .openBrowser: return String(localized: "shortcut.openBrowser.label", defaultValue: "Open Browser")
             case .toggleBrowserDeveloperTools: return String(localized: "shortcut.toggleBrowserDevTools.label", defaultValue: "Toggle Browser Developer Tools")
@@ -123,7 +119,6 @@ enum KeyboardShortcutSettings {
             case .selectSurfaceByNumber: return "shortcut.selectSurfaceByNumber"
             case .newSurface: return "shortcut.newSurface"
             case .toggleTerminalCopyMode: return "shortcut.toggleTerminalCopyMode"
-            case .createWorktree: return "shortcut.createWorktree"
             case .toggleDiffPanel: return "shortcut.toggleDiffPanel"
             case .openBrowser: return "shortcut.openBrowser"
             case .toggleBrowserDeveloperTools: return "shortcut.toggleBrowserDeveloperTools"
@@ -191,8 +186,6 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "m", command: true, shift: true, option: false, control: false)
             case .selectWorkspaceByNumber:
                 return StoredShortcut(key: "1", command: true, shift: false, option: false, control: false)
-            case .createWorktree:
-                return StoredShortcut(key: "g", command: true, shift: true, option: false, control: false)
             case .toggleDiffPanel:
                 return StoredShortcut(key: "k", command: true, shift: true, option: false, control: false)
             case .openBrowser:

@@ -104,6 +104,115 @@ final class WorktreeManager {
         return info
     }
 
+    /// Lists ALL worktrees for the repository at the given path.
+    /// Unlike `list(workingDirectory:)` which takes a working directory and resolves
+    /// the repo root, this takes a repo path directly.
+    func listAll(repoPath: String) async throws -> [WorktreeInfo] {
+        let output = try await runGit(["worktree", "list", "--porcelain"], in: repoPath)
+        return try parseWorktreeList(output, repoRoot: repoPath)
+    }
+
+    /// Gets the default base branch (main or master) for the repo at the given path.
+    func defaultBaseBranch(repoPath: String) async -> String {
+        // Try symbolic-ref for origin/HEAD first
+        if let output = try? await runGit(
+            ["symbolic-ref", "refs/remotes/origin/HEAD"],
+            in: repoPath
+        ) {
+            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let lastComponent = trimmed.split(separator: "/").last {
+                return String(lastComponent)
+            }
+        }
+        // Fallback: check if "main" exists
+        if (try? await runGit(["rev-parse", "--verify", "main"], in: repoPath)) != nil {
+            return "main"
+        }
+        // Fallback: check if "master" exists
+        if (try? await runGit(["rev-parse", "--verify", "master"], in: repoPath)) != nil {
+            return "master"
+        }
+        return "main"
+    }
+
+    /// Lists all branches (local + remote, deduplicated, sorted alphabetically).
+    func listBranches(repoPath: String) async -> [String] {
+        guard let output = try? await runGit(
+            ["branch", "-a", "--format=%(refname:short)"],
+            in: repoPath
+        ) else {
+            return []
+        }
+        let lines = output.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // Collect local branches
+        var localBranches: Set<String> = []
+        var allBranches: Set<String> = []
+
+        for line in lines {
+            // Filter out HEAD entries
+            if line.contains("HEAD") { continue }
+
+            if line.hasPrefix("origin/") {
+                let stripped = String(line.dropFirst("origin/".count))
+                // Only add remote branch if no matching local branch exists
+                if !localBranches.contains(stripped) {
+                    allBranches.insert(stripped)
+                }
+            } else {
+                localBranches.insert(line)
+                allBranches.insert(line)
+                // Remove previously-added remote duplicate if local now known
+                // (the remote version would be the same name, already in allBranches)
+            }
+        }
+
+        return allBranches.sorted()
+    }
+
+    /// Adds a worktree for an existing branch (no -b flag, no new branch creation).
+    /// - Parameters:
+    ///   - branch: The existing branch name to check out in the new worktree.
+    ///   - directory: Optional explicit directory path. If nil, uses convention.
+    ///   - repoPath: The repository root path.
+    /// - Returns: Info about the newly created worktree.
+    func addExisting(
+        branch: String,
+        directory: String?,
+        repoPath: String
+    ) async throws -> WorktreeInfo {
+        let repoName = URL(fileURLWithPath: repoPath).lastPathComponent
+        let slug = Self.branchSlug(branch)
+        let worktreePath = directory ?? {
+            let parentDir = URL(fileURLWithPath: repoPath).deletingLastPathComponent()
+            return parentDir
+                .appendingPathComponent("\(repoName)-worktrees")
+                .appendingPathComponent(slug)
+                .path
+        }()
+
+        // Check if branch already exists as a worktree
+        let existing = try await listAll(repoPath: repoPath)
+        if existing.contains(where: { $0.branch == branch }) {
+            throw WorktreeError.branchAlreadyExists(branch: branch)
+        }
+
+        // git worktree add <path> <branch> — no -b flag
+        let args = ["worktree", "add", worktreePath, branch]
+        _ = try await runGit(args, in: repoPath)
+
+        // Fetch the info for the newly created worktree
+        let worktrees = try await listAll(repoPath: repoPath)
+        guard let info = worktrees.first(where: {
+            normalizePath($0.path) == normalizePath(worktreePath)
+        }) else {
+            throw WorktreeError.parseError(detail: "Created worktree not found in list output")
+        }
+        return info
+    }
+
     /// Removes a worktree at the given path.
     /// - Parameters:
     ///   - path: The filesystem path of the worktree to remove.
