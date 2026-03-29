@@ -9,7 +9,6 @@ Built on Ghostty (libghostty), Swift/AppKit, macOS 14+.
 | | |
 |---|---|
 | **Apple Silicon** (M1/M2/M3/M4) | [kolt-macos-apple-silicon.dmg](releases/kolt-macos-apple-silicon.dmg) |
-| **Intel** | [kolt-macos-intel.dmg](releases/kolt-macos-intel.dmg) |
 
 Open the `.dmg` and drag Kolt to Applications. On first launch, right-click → Open to bypass Gatekeeper (the app is not notarized).
 
