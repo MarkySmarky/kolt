@@ -62,7 +62,7 @@ def get_cmux_pid() -> int | None:
     )
     if result.returncode != 0:
         result = subprocess.run(
-            ["pgrep", "-f", r"cmux DEV\.app/Contents/MacOS/cmux"],
+            ["pgrep", "-f", r"Kolt DEV\.app/Contents/MacOS/cmux"],
             capture_output=True, text=True,
         )
     if result.returncode != 0:

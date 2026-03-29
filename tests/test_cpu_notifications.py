@@ -75,7 +75,7 @@ def get_cmux_pid() -> Optional[int]:
     if result.returncode != 0:
         # Try DEV build
         result = subprocess.run(
-            ["pgrep", "-f", r"cmux DEV\.app/Contents/MacOS/cmux"],
+            ["pgrep", "-f", r"Kolt DEV\.app/Contents/MacOS/cmux"],
             capture_output=True,
             text=True,
         )
