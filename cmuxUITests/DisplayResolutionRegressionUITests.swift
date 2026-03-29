@@ -309,7 +309,7 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
         // UI test bundle is at:
         //   .../Build/Products/Debug/cmuxUITests-Runner.app/Contents/PlugIns/cmuxUITests.xctest
         // The app binary is at:
-        //   .../Build/Products/Debug/cmux DEV.app/Contents/MacOS/cmux DEV
+        //   .../Build/Products/Debug/Kolt DEV.app/Contents/MacOS/Kolt DEV
         let testBundle = Bundle(for: Self.self)
         let productsDir = testBundle.bundleURL
             .deletingLastPathComponent()  // -> .../Contents/PlugIns
@@ -317,8 +317,8 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
             .deletingLastPathComponent()  // -> .../cmuxUITests-Runner.app
             .deletingLastPathComponent()  // -> .../Debug
         let binaryPath = productsDir
-            .appendingPathComponent("cmux DEV.app")
-            .appendingPathComponent("Contents/MacOS/cmux DEV")
+            .appendingPathComponent("Kolt DEV.app")
+            .appendingPathComponent("Contents/MacOS/Kolt DEV")
             .path
         if FileManager.default.fileExists(atPath: binaryPath) {
             return binaryPath

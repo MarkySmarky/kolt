@@ -7,7 +7,7 @@ CONFIGURATION="${CMUX_CONFIGURATION:-Debug}"
 
 case "$CONFIGURATION" in
   Debug)
-    APP_NAME="cmux DEV.app"
+    APP_NAME="Kolt DEV.app"
     ;;
   Release)
     APP_NAME="cmux.app"
