@@ -1,8 +1,8 @@
 import XCTest
 
-#if canImport(cmux)
+#if canImport(Kolt)
 @testable import Kolt
-#elseif canImport(cmux_DEV)
+#elseif canImport(Kolt_DEV)
 @testable import Kolt_DEV
 #endif
 
