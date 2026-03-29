@@ -140,13 +140,35 @@ final class GitWatcher: ObservableObject {
 
     // MARK: - File Watching
 
+    /// Resolves the path to the git index file, handling both regular repos and worktrees.
+    /// In a regular repo, `git rev-parse --git-dir` returns `.git` (relative).
+    /// In a worktree, it returns an absolute path like `/repo/.git/worktrees/<name>`.
+    private func resolveGitIndexPath() -> String? {
+        let gitDir = runGitCommand(["rev-parse", "--git-dir"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !gitDir.isEmpty else { return nil }
+
+        let absoluteGitDir: String
+        if (gitDir as NSString).isAbsolutePath {
+            absoluteGitDir = gitDir
+        } else {
+            absoluteGitDir = (workingDirectory as NSString).appendingPathComponent(gitDir)
+        }
+        return (absoluteGitDir as NSString).appendingPathComponent("index")
+    }
+
     private func startWatching() {
-        let gitIndexPath = (workingDirectory as NSString).appendingPathComponent(".git/index")
+        guard let gitIndexPath = resolveGitIndexPath() else {
+            #if DEBUG
+            dlog("[GitWatcher] Could not resolve git index path for \(workingDirectory)")
+            #endif
+            return
+        }
 
         let fd = open(gitIndexPath, O_EVTONLY)
         guard fd >= 0 else {
             #if DEBUG
-            dlog("[GitWatcher] Failed to open .git/index at \(gitIndexPath)")
+            dlog("[GitWatcher] Failed to open git index at \(gitIndexPath)")
             #endif
             return
         }
