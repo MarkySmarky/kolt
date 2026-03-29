@@ -5507,6 +5507,125 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    func presentWorkspaceCreationSheet() {
+        guard let context = preferredMainWindowContextForWorkspaceCreation(debugSource: "shortcut.newWorkspace"),
+              let window = context.window ?? windowForMainWindowId(context.windowId) else {
+            return
+        }
+
+        // Determine repo path from the current workspace's directory
+        let repoPath: String? = {
+            guard let workspace = context.tabManager.selectedWorkspace else { return nil }
+            let dir = workspace.currentDirectory
+            guard !dir.isEmpty else { return nil }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["rev-parse", "--show-toplevel"]
+            process.currentDirectoryURL = URL(fileURLWithPath: dir)
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0 else { return nil }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let path = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return (path?.isEmpty == false) ? path : nil
+            } catch {
+                return nil
+            }
+        }()
+
+        let tabManager = context.tabManager
+
+        let sheet = WorkspaceCreationSheet(
+            repoPath: repoPath,
+            onCreateNewBranch: { [weak tabManager] branchName, baseBranch in
+                guard let tabManager, let repoPath else {
+                    window.endSheet(window.attachedSheet ?? window)
+                    return
+                }
+                let worktreeManager = WorktreeManager()
+                Task { @MainActor in
+                    defer { window.endSheet(window.attachedSheet ?? window) }
+                    do {
+                        let info = try await worktreeManager.add(
+                            branch: branchName,
+                            baseBranch: baseBranch,
+                            directory: nil,
+                            workingDirectory: repoPath
+                        )
+                        let newWorkspace = tabManager.addWorkspace(
+                            title: branchName,
+                            workingDirectory: info.path,
+                            select: true
+                        )
+                        newWorkspace.attachWorktree(info)
+                    } catch {
+                        #if DEBUG
+                        dlog("workspace.creation.newBranch.error \(error.localizedDescription)")
+                        #endif
+                        let errorAlert = NSAlert()
+                        errorAlert.messageText = String(
+                            localized: "worktree.create.errorTitle",
+                            defaultValue: "Worktree Creation Failed"
+                        )
+                        errorAlert.informativeText = error.localizedDescription
+                        errorAlert.alertStyle = .warning
+                        errorAlert.runModal()
+                    }
+                }
+            },
+            onExistingBranch: { [weak tabManager] branchName in
+                guard let tabManager, let repoPath else {
+                    window.endSheet(window.attachedSheet ?? window)
+                    return
+                }
+                let worktreeManager = WorktreeManager()
+                Task { @MainActor in
+                    defer { window.endSheet(window.attachedSheet ?? window) }
+                    do {
+                        let info = try await worktreeManager.addExisting(
+                            branch: branchName,
+                            directory: nil,
+                            repoPath: repoPath
+                        )
+                        let newWorkspace = tabManager.addWorkspace(
+                            title: branchName,
+                            workingDirectory: info.path,
+                            select: true
+                        )
+                        newWorkspace.attachWorktree(info)
+                    } catch {
+                        #if DEBUG
+                        dlog("workspace.creation.existingBranch.error \(error.localizedDescription)")
+                        #endif
+                        let errorAlert = NSAlert()
+                        errorAlert.messageText = String(
+                            localized: "worktree.create.errorTitle",
+                            defaultValue: "Worktree Creation Failed"
+                        )
+                        errorAlert.informativeText = error.localizedDescription
+                        errorAlert.alertStyle = .warning
+                        errorAlert.runModal()
+                    }
+                }
+            },
+            onEmptyWorkspace: { [weak tabManager] in
+                window.endSheet(window.attachedSheet ?? window)
+                _ = tabManager?.addWorkspace()
+            },
+            onCancel: {
+                window.endSheet(window.attachedSheet ?? window)
+            }
+        )
+
+        let hostingController = NSHostingController(rootView: sheet)
+        window.contentViewController?.presentAsSheet(hostingController)
+    }
+
     @objc func openWindow(
         _ pasteboard: NSPasteboard,
         userData: String?,
@@ -9459,7 +9578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #endif
             // Cmd+N semantics:
             // - If there are no main windows, create a new window.
-            // - Otherwise, create a new workspace in the active window.
+            // - Otherwise, present the workspace creation sheet.
             if mainWindowContexts.isEmpty {
                 #if DEBUG
                 logWorkspaceCreationRouting(
@@ -9471,17 +9590,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 )
                 #endif
                 openNewMainWindow(nil)
-            } else if addWorkspaceInPreferredMainWindow(event: event, debugSource: "shortcut.cmdN") == nil {
-                #if DEBUG
-                logWorkspaceCreationRouting(
-                    phase: "fallback_new_window",
-                    source: "shortcut.cmdN",
-                    reason: "workspace_creation_returned_nil",
-                    event: event,
-                    chosenContext: nil
-                )
-                #endif
-                openNewMainWindow(nil)
+            } else {
+                presentWorkspaceCreationSheet()
             }
             return true
         }
@@ -9519,6 +9629,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             NotificationCenter.default.post(name: .feedbackComposerRequested, object: targetWindow)
             return true
         }
+
+        // (Worktree creation is now handled via the workspace creation sheet)
 
         // Check Jump to Unread shortcut
         if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .jumpToUnread)) {
@@ -9806,6 +9918,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             dlog("shortcut.action name=splitBrowserDown \(debugShortcutRouteSnapshot(event: event))")
 #endif
             _ = performBrowserSplitShortcut(direction: .down)
+            return true
+        }
+
+        // Diff panel toggle: Ctrl+Cmd+D
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .toggleDiffPanel)) {
+#if DEBUG
+            dlog("shortcut.action name=toggleDiffPanel \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            if let workspace = tabManager?.selectedWorkspace {
+                // Toggle: close existing DiffPanel or open a new one.
+                let existingDiffPanels = workspace.panels.values.compactMap { $0 as? DiffPanel }
+                if let existingDiff = existingDiffPanels.first {
+                    _ = workspace.closePanel(existingDiff.id)
+                } else if let focusedPanelId = workspace.focusedPanelId {
+                    let cwd = workspace.currentDirectory ?? FileManager.default.currentDirectoryPath
+                    workspace.newDiffSplit(
+                        from: focusedPanelId,
+                        orientation: .vertical,
+                        workingDirectory: cwd
+                    )
+                }
+            }
             return true
         }
 

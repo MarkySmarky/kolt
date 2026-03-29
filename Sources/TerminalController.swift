@@ -2084,6 +2084,16 @@ class TerminalController {
         case "workspace.remote.terminal_session_end":
             return v2Result(id: id, self.v2WorkspaceRemoteTerminalSessionEnd(params: params))
 
+        // Worktrees
+        case "worktree.list":
+            return v2Result(id: id, self.v2WorktreeList(params: params))
+        case "worktree.add":
+            return v2Result(id: id, self.v2WorktreeAdd(params: params))
+        case "worktree.remove":
+            return v2Result(id: id, self.v2WorktreeRemove(params: params))
+        case "worktree.switch":
+            return v2Result(id: id, self.v2WorktreeSwitch(params: params))
+
         // Settings
         case "settings.open":
             return v2Result(id: id, self.v2SettingsOpen(params: params))
@@ -2345,9 +2355,24 @@ class TerminalController {
         case "markdown.open":
             return v2Result(id: id, self.v2MarkdownOpen(params: params))
 
+        // Diff
+        case "diff.create":
+            return v2Result(id: id, self.v2DiffCreate(params: params))
+        case "diff.toggle":
+            return v2Result(id: id, self.v2DiffToggle(params: params))
+        case "diff.refresh":
+            return v2Result(id: id, self.v2DiffRefresh(params: params))
+
         case "surface.read_text":
             return v2Result(id: id, self.v2SurfaceReadText(params: params))
 
+        // CI Status
+        case "ci.status":
+            return v2Result(id: id, self.v2CIStatus(params: params))
+        case "ci.refresh":
+            return v2Result(id: id, self.v2CIRefresh(params: params))
+        case "ci.open":
+            return v2Result(id: id, self.v2CIOpen(params: params))
 
 #if DEBUG
         // Debug / test-only
@@ -2451,6 +2476,10 @@ class TerminalController {
             "workspace.remote.disconnect",
             "workspace.remote.status",
             "workspace.remote.terminal_session_end",
+            "worktree.list",
+            "worktree.add",
+            "worktree.remove",
+            "worktree.switch",
             "settings.open",
             "feedback.open",
             "feedback.submit",
@@ -7360,6 +7389,156 @@ class TerminalController {
                 "target_pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
                 "path": filePath
             ])
+        }
+        return result
+    }
+
+    // MARK: - Diff
+
+    private func v2DiffCreate(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to create diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            v2MaybeFocusWindow(for: tabManager)
+            v2MaybeSelectWorkspace(tabManager, workspace: ws)
+
+            let sourceSurfaceId = v2UUID(params, "surface_id") ?? ws.focusedPanelId
+            guard let sourceSurfaceId else {
+                result = .err(code: "not_found", message: "No focused surface to split", data: nil)
+                return
+            }
+            guard ws.panels[sourceSurfaceId] != nil else {
+                result = .err(code: "not_found", message: "Source surface not found", data: ["surface_id": sourceSurfaceId.uuidString])
+                return
+            }
+
+            let sourcePaneUUID = ws.paneId(forPanelId: sourceSurfaceId)?.id
+
+            let directionStr = v2String(params, "direction") ?? "right"
+            guard let direction = parseSplitDirection(directionStr) else {
+                result = .err(code: "invalid_params", message: "Invalid direction '\(directionStr)' (left|right|up|down)", data: nil)
+                return
+            }
+            let orientation: SplitOrientation = direction.isHorizontal ? .horizontal : .vertical
+            let insertFirst = (direction == .left || direction == .up)
+
+            // Resolve working directory: explicit param, or infer from workspace directory.
+            let workingDir = v2String(params, "path") ?? ws.currentDirectory
+
+            let createdPanel = ws.newDiffSplit(
+                from: sourceSurfaceId,
+                orientation: orientation,
+                insertFirst: insertFirst,
+                workingDirectory: workingDir,
+                focus: v2FocusAllowed()
+            )
+
+            guard let diffPanelId = createdPanel?.id else {
+                result = .err(code: "internal_error", message: "Failed to create diff panel", data: nil)
+                return
+            }
+
+            let targetPaneUUID = ws.paneId(forPanelId: diffPanelId)?.id
+            let windowId = v2ResolveWindowId(tabManager: tabManager)
+            result = .ok([
+                "window_id": v2OrNull(windowId?.uuidString),
+                "window_ref": v2Ref(kind: .window, uuid: windowId),
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "pane_id": v2OrNull(targetPaneUUID?.uuidString),
+                "pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
+                "surface_id": diffPanelId.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: diffPanelId),
+                "source_surface_id": sourceSurfaceId.uuidString,
+                "source_surface_ref": v2Ref(kind: .surface, uuid: sourceSurfaceId),
+                "source_pane_id": v2OrNull(sourcePaneUUID?.uuidString),
+                "source_pane_ref": v2Ref(kind: .pane, uuid: sourcePaneUUID),
+                "target_pane_id": v2OrNull(targetPaneUUID?.uuidString),
+                "target_pane_ref": v2Ref(kind: .pane, uuid: targetPaneUUID),
+                "path": workingDir
+            ])
+        }
+        return result
+    }
+
+    private func v2DiffToggle(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to toggle diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            // Find existing diff panel in workspace
+            if let surfaceId = v2UUID(params, "surface_id") {
+                guard let panel = ws.panels[surfaceId] as? DiffPanel else {
+                    result = .err(code: "not_found", message: "Diff panel not found", data: ["surface_id": surfaceId.uuidString])
+                    return
+                }
+                // Toggle: close if already focused, focus if not
+                if ws.focusedPanelId == panel.id {
+                    _ = ws.closePanel(panel.id)
+                    result = .ok(["action": "closed", "surface_id": surfaceId.uuidString])
+                } else {
+                    ws.focusPanel(panel.id)
+                    result = .ok(["action": "focused", "surface_id": surfaceId.uuidString])
+                }
+            } else {
+                // Find first diff panel in workspace
+                let diffPanel = ws.panels.values.first(where: { $0 is DiffPanel }) as? DiffPanel
+                if let diffPanel {
+                    if ws.focusedPanelId == diffPanel.id {
+                        _ = ws.closePanel(diffPanel.id)
+                        result = .ok(["action": "closed", "surface_id": diffPanel.id.uuidString])
+                    } else {
+                        ws.focusPanel(diffPanel.id)
+                        result = .ok(["action": "focused", "surface_id": diffPanel.id.uuidString])
+                    }
+                } else {
+                    result = .err(code: "not_found", message: "No diff panel found in workspace", data: nil)
+                }
+            }
+        }
+        return result
+    }
+
+    private func v2DiffRefresh(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to refresh diff panel", data: nil)
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            let diffPanel: DiffPanel?
+            if let surfaceId = v2UUID(params, "surface_id") {
+                diffPanel = ws.panels[surfaceId] as? DiffPanel
+            } else {
+                diffPanel = ws.panels.values.first(where: { $0 is DiffPanel }) as? DiffPanel
+            }
+
+            guard let diffPanel else {
+                result = .err(code: "not_found", message: "No diff panel found in workspace", data: nil)
+                return
+            }
+
+            diffPanel.forceRefresh()
+            result = .ok(["surface_id": diffPanel.id.uuidString])
         }
         return result
     }
@@ -15582,6 +15761,372 @@ class TerminalController {
                 result = "OK \(id.uuidString)"
             }
         }
+        return result
+    }
+
+    // MARK: - V2 Worktree Commands
+
+    /// Lists all worktree-associated workspaces.
+    private func v2WorktreeList(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var worktrees: [[String: Any]] = []
+        v2MainSync {
+            for workspace in tabManager.tabs {
+                guard let info = workspace.worktreeInfo else { continue }
+                worktrees.append([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "path": info.path,
+                    "branch": info.branch,
+                    "commit_hash": info.commitHash,
+                    "is_main": info.isMain
+                ])
+            }
+        }
+
+        return .ok(["worktrees": worktrees])
+    }
+
+    /// Creates a new worktree and opens a workspace for it.
+    private func v2WorktreeAdd(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        guard let branch = v2String(params, "branch") else {
+            return .err(code: "invalid_params", message: "Missing or empty 'branch' parameter", data: nil)
+        }
+
+        let baseBranch = v2RawString(params, "base_branch")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let directory = v2RawString(params, "directory")?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Find a source workspace to determine the repository context
+        var sourceWorkspace: Workspace?
+        let sourceWorkspaceId = v2UUID(params, "workspace_id")
+        v2MainSync {
+            if let wsId = sourceWorkspaceId {
+                sourceWorkspace = tabManager.tabs.first(where: { $0.id == wsId })
+            } else {
+                sourceWorkspace = tabManager.selectedWorkspace
+            }
+        }
+
+        guard let source = sourceWorkspace else {
+            return .err(code: "unavailable", message: "No workspace available for git context", data: nil)
+        }
+
+        // Run the async worktree creation synchronously on the socket handler queue.
+        // Socket commands default to off-main handling per threading policy.
+        var resultInfo: WorktreeManager.WorktreeInfo?
+        var resultError: String?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        Task { @MainActor in
+            do {
+                resultInfo = try await source.createWorktree(
+                    branch: branch,
+                    baseBranch: baseBranch?.isEmpty == false ? baseBranch : nil,
+                    directory: directory?.isEmpty == false ? directory : nil
+                )
+            } catch {
+                resultError = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        guard let info = resultInfo else {
+            return .err(
+                code: "worktree_error",
+                message: resultError ?? "Failed to create worktree",
+                data: nil
+            )
+        }
+
+        // Create a workspace for the worktree
+        var newWorkspaceId: UUID?
+        let shouldFocus = v2FocusAllowed()
+        v2MainSync {
+            let ws = tabManager.addWorkspace(
+                title: branch,
+                workingDirectory: info.path,
+                select: shouldFocus,
+                eagerLoadTerminal: !shouldFocus
+            )
+            ws.attachWorktree(info)
+            newWorkspaceId = ws.id
+        }
+
+        guard let wsId = newWorkspaceId else {
+            return .err(code: "internal_error", message: "Failed to create workspace for worktree", data: nil)
+        }
+
+        let windowId = v2ResolveWindowId(tabManager: tabManager)
+        return .ok([
+            "workspace_id": wsId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: wsId),
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "path": info.path,
+            "branch": info.branch,
+            "commit_hash": info.commitHash
+        ])
+    }
+
+    /// Removes a worktree and optionally closes the associated workspace.
+    private func v2WorktreeRemove(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        let force = v2Bool(params, "force") ?? false
+
+        // Resolve the target workspace
+        var targetWorkspace: Workspace?
+        v2MainSync {
+            if let wsId = v2UUID(params, "workspace_id") {
+                targetWorkspace = tabManager.tabs.first(where: { $0.id == wsId })
+            } else if let path = v2String(params, "path") {
+                targetWorkspace = tabManager.tabs.first(where: {
+                    $0.worktreeInfo?.path == path
+                })
+            }
+        }
+
+        guard let workspace = targetWorkspace,
+              let info = workspace.worktreeInfo else {
+            return .err(code: "not_found", message: "No worktree workspace found", data: nil)
+        }
+
+        guard !info.isMain else {
+            return .err(code: "invalid_operation", message: "Cannot remove the main worktree", data: nil)
+        }
+
+        // Remove the worktree asynchronously.
+        // Socket commands default to off-main handling per threading policy.
+        var resultError: String?
+        let semaphore = DispatchSemaphore(value: 0)
+
+        Task { @MainActor in
+            do {
+                try await workspace.removeWorktree(path: info.path, force: force)
+            } catch {
+                resultError = error.localizedDescription
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        if let error = resultError {
+            return .err(code: "worktree_error", message: error, data: nil)
+        }
+
+        // Close the workspace
+        let closeWorkspaces = v2Bool(params, "close_workspace") ?? true
+        if closeWorkspaces {
+            v2MainSync {
+                workspace.detachWorktree()
+                tabManager.closeWorkspace(workspace)
+            }
+        } else {
+            v2MainSync {
+                workspace.detachWorktree()
+            }
+        }
+
+        return .ok(["removed": true, "branch": info.branch, "path": info.path])
+    }
+
+    /// Switches to a worktree workspace by branch name or path.
+    private func v2WorktreeSwitch(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        let targetBranch = v2String(params, "branch")
+        let targetPath = v2String(params, "path")
+        let targetWorkspaceId = v2UUID(params, "workspace_id")
+
+        guard targetBranch != nil || targetPath != nil || targetWorkspaceId != nil else {
+            return .err(
+                code: "invalid_params",
+                message: "Must provide 'branch', 'path', or 'workspace_id' to switch to",
+                data: nil
+            )
+        }
+
+        var matchedWorkspace: Workspace?
+        v2MainSync {
+            for ws in tabManager.tabs {
+                guard let info = ws.worktreeInfo else { continue }
+                if let wsId = targetWorkspaceId, ws.id == wsId {
+                    matchedWorkspace = ws
+                    break
+                }
+                if let branch = targetBranch, info.branch == branch {
+                    matchedWorkspace = ws
+                    break
+                }
+                if let path = targetPath, info.path == path {
+                    matchedWorkspace = ws
+                    break
+                }
+            }
+        }
+
+        guard let workspace = matchedWorkspace else {
+            return .err(code: "not_found", message: "No worktree workspace matching the given criteria", data: nil)
+        }
+
+        v2MainSync {
+            v2MaybeFocusWindow(for: tabManager)
+            v2MaybeSelectWorkspace(tabManager, workspace: workspace)
+        }
+
+        let windowId = v2ResolveWindowId(tabManager: tabManager)
+        return .ok([
+            "workspace_id": workspace.id.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "branch": v2OrNull(workspace.worktreeInfo?.branch),
+            "path": v2OrNull(workspace.worktreeInfo?.path)
+        ])
+    }
+
+    // MARK: - V2 CI Status Methods
+
+    private func v2CIStatus(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to read CI status", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller else {
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "ci_status": "unavailable",
+                    "ci_available": false,
+                    "runs": [] as [[String: Any]]
+                ])
+                return
+            }
+
+            let runsPayload: [[String: Any]] = poller.runs.map { run in
+                var entry: [String: Any] = [
+                    "status": run.status,
+                    "name": run.name,
+                    "workflow_name": run.workflowName,
+                    "url": run.url
+                ]
+                entry["conclusion"] = run.conclusion ?? NSNull()
+                return entry
+            }
+
+            result = .ok([
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "ci_status": poller.status.rawValue,
+                "ci_available": true,
+                "latest_run_url": v2OrNull(poller.latestRunURL),
+                "runs": runsPayload
+            ])
+        }
+
+        return result
+    }
+
+    private func v2CIRefresh(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to refresh CI status", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller else {
+                result = .err(
+                    code: "unavailable",
+                    message: "CI polling not active for this workspace",
+                    data: ["workspace_id": workspace.id.uuidString]
+                )
+                return
+            }
+
+            poller.refresh()
+            result = .ok([
+                "workspace_id": workspace.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                "refreshed": true
+            ])
+        }
+
+        return result
+    }
+
+    private func v2CIOpen(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to open CI URL", data: nil)
+        v2MainSync {
+            guard let workspace = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+
+            guard let poller = workspace.ciPoller,
+                  let urlString = poller.latestRunURL,
+                  let url = URL(string: urlString) else {
+                result = .err(
+                    code: "unavailable",
+                    message: "No CI run URL available",
+                    data: ["workspace_id": workspace.id.uuidString]
+                )
+                return
+            }
+
+            let panelId = tabManager.openBrowser(
+                inWorkspace: workspace.id,
+                url: url,
+                preferSplitRight: true,
+                insertAtEnd: true
+            )
+
+            if let panelId {
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "surface_id": panelId.uuidString,
+                    "surface_ref": v2Ref(kind: .surface, uuid: panelId),
+                    "url": urlString
+                ])
+            } else {
+                NSWorkspace.shared.open(url)
+                result = .ok([
+                    "workspace_id": workspace.id.uuidString,
+                    "workspace_ref": v2Ref(kind: .workspace, uuid: workspace.id),
+                    "opened_externally": true,
+                    "url": urlString
+                ])
+            }
+        }
+
         return result
     }
 

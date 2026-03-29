@@ -5026,6 +5026,8 @@ struct ContentView: View {
             return String(localized: "commandPalette.kind.browser", defaultValue: "Browser")
         case .markdown:
             return String(localized: "commandPalette.kind.markdown", defaultValue: "Markdown")
+        case .diff:
+            return String(localized: "commandPalette.kind.diff", defaultValue: "Diff")
         }
     }
 
@@ -5037,6 +5039,8 @@ struct ContentView: View {
             return ["browser", "web", "page"]
         case .markdown:
             return ["markdown", "note", "preview"]
+        case .diff:
+            return ["diff", "changes", "git"]
         }
     }
 
@@ -7104,6 +7108,8 @@ struct ContentView: View {
             return "browser.addressBar"
         case .browser(.findField):
             return "browser.findField"
+        case .diff:
+            return "diff.webView"
         }
     }
 #endif
@@ -8505,6 +8511,10 @@ struct VerticalTabsSidebar: View {
     @StateObject private var dragFailsafeMonitor = SidebarDragFailsafeMonitor()
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
+    @State private var sidebarWorktrees: [WorktreeManager.WorktreeInfo] = []
+    @State private var mergedBranches: Set<String> = []
+    @State private var worktreesSectionCollapsed: Bool = false
+    @State private var isWorkspaceCreationSheetPresented: Bool = false
     @AppStorage(SidebarWorkspaceDetailSettings.hideAllDetailsKey)
     private var sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
     @AppStorage(SidebarWorkspaceDetailSettings.showNotificationMessageKey)
@@ -8607,6 +8617,8 @@ struct VerticalTabsSidebar: View {
                         }
                         .padding(.vertical, 8)
 
+                        worktreesSidebarSection()
+
                         SidebarEmptyArea(
                             rowSpacing: tabRowSpacing,
                             selection: $selection,
@@ -8670,6 +8682,13 @@ struct VerticalTabsSidebar: View {
                 tabId: nil,
                 reason: "sidebar_appear"
             )
+            refreshWorktreeList()
+        }
+        .onChange(of: tabManager.selectedTabId) { _ in
+            refreshWorktreeList()
+        }
+        .onChange(of: tabManager.selectedWorkspace?.currentDirectory) { _ in
+            refreshWorktreeList()
         }
         .onDisappear {
             modifierKeyMonitor.stop()
@@ -8714,6 +8733,313 @@ struct VerticalTabsSidebar: View {
     private func debugShortSidebarTabId(_ id: UUID?) -> String {
         guard let id else { return "nil" }
         return String(id.uuidString.prefix(5))
+    }
+
+    // MARK: - Worktrees Sidebar Section
+
+    @ViewBuilder
+    private func worktreesSidebarSection() -> some View {
+        if !sidebarWorktrees.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider()
+                    .padding(.vertical, 4)
+
+                HStack {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            worktreesSectionCollapsed.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: worktreesSectionCollapsed ? "chevron.right" : "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Text(String(
+                                localized: "sidebar.worktrees.header",
+                                defaultValue: "WORKTREES"
+                            ))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer()
+
+                    Button {
+                        AppDelegate.shared?.presentWorkspaceCreationSheet()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .safeHelp(String(
+                        localized: "sidebar.worktrees.addTooltip",
+                        defaultValue: "New Workspace"
+                    ))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 2)
+
+                if !worktreesSectionCollapsed {
+                    LazyVStack(spacing: 1) {
+                        ForEach(sidebarWorktrees, id: \.path) { worktree in
+                            worktreeRow(worktree)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeRow(_ worktree: WorktreeManager.WorktreeInfo) -> some View {
+        let isCurrentWorktree = tabManager.selectedWorkspace?.worktreeInfo?.path == worktree.path
+        let abbreviatedPath = abbreviateWorktreePath(worktree.path)
+
+        WorktreeRowContent(
+            worktree: worktree,
+            isCurrentWorktree: isCurrentWorktree,
+            isMerged: !worktree.isMain && mergedBranches.contains(worktree.branch),
+            abbreviatedPath: abbreviatedPath,
+            onDoubleClick: { switchToWorktree(worktree) },
+            onDelete: worktree.isMain ? nil : { [worktree] in sidebarDeleteWorktree(worktree) }
+        )
+    }
+
+    private func abbreviateWorktreePath(_ path: String) -> String {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix(homeDir) {
+            return "~" + path.dropFirst(homeDir.count)
+        }
+        return path
+    }
+
+    private func switchToWorktree(_ worktree: WorktreeManager.WorktreeInfo) {
+        let normalizedPath = URL(fileURLWithPath: worktree.path).standardizedFileURL.path
+        // Check if a workspace already exists for this worktree
+        if let existing = tabManager.tabs.first(where: {
+            URL(fileURLWithPath: $0.currentDirectory).standardizedFileURL.path == normalizedPath
+        }) {
+            tabManager.selectedTabId = existing.id
+            return
+        }
+        // Create a new workspace for this worktree
+        let newWorkspace = tabManager.addWorkspace(
+            title: worktree.branch,
+            workingDirectory: worktree.path,
+            select: true
+        )
+        newWorkspace.attachWorktree(worktree)
+    }
+
+    private func sidebarDeleteWorktree(_ worktree: WorktreeManager.WorktreeInfo) {
+        let alert = NSAlert()
+        alert.messageText = String(
+            localized: "worktree.delete.title",
+            defaultValue: "Delete Worktree"
+        )
+        alert.informativeText = String(
+            localized: "worktree.delete.message",
+            defaultValue: "Are you sure you want to delete the worktree for branch '\(worktree.branch)'?"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "common.delete", defaultValue: "Delete"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard let currentDir = tabManager.selectedWorkspace?.currentDirectory else { return }
+        let worktreeManager = WorktreeManager()
+
+        Task { @MainActor in
+            do {
+                try await worktreeManager.remove(path: worktree.path, force: false, workingDirectory: currentDir)
+                // Detach any workspace that was using this worktree
+                for workspace in tabManager.tabs where workspace.worktreeInfo?.path == worktree.path {
+                    workspace.detachWorktree()
+                }
+                refreshWorktreeList()
+            } catch {
+                #if DEBUG
+                dlog("sidebar.worktree.delete.error \(error.localizedDescription)")
+                #endif
+                if case WorktreeManager.WorktreeError.uncommittedChanges = error {
+                    let forceAlert = NSAlert()
+                    forceAlert.messageText = String(
+                        localized: "worktree.delete.uncommitted.title",
+                        defaultValue: "Uncommitted Changes"
+                    )
+                    forceAlert.informativeText = String(
+                        localized: "worktree.delete.uncommitted.message",
+                        defaultValue: "The worktree has uncommitted changes. Force delete?"
+                    )
+                    forceAlert.alertStyle = .critical
+                    forceAlert.addButton(withTitle: String(
+                        localized: "common.forceDelete",
+                        defaultValue: "Force Delete"
+                    ))
+                    forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+                    guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                    do {
+                        try await worktreeManager.remove(path: worktree.path, force: true, workingDirectory: currentDir)
+                        for workspace in tabManager.tabs where workspace.worktreeInfo?.path == worktree.path {
+                            workspace.detachWorktree()
+                        }
+                        refreshWorktreeList()
+                    } catch {
+                        let failAlert = NSAlert()
+                        failAlert.messageText = String(
+                            localized: "worktree.delete.errorTitle",
+                            defaultValue: "Worktree Deletion Failed"
+                        )
+                        failAlert.informativeText = error.localizedDescription
+                        failAlert.alertStyle = .warning
+                        failAlert.runModal()
+                    }
+                } else {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = String(
+                        localized: "worktree.delete.errorTitle",
+                        defaultValue: "Worktree Deletion Failed"
+                    )
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .warning
+                    errorAlert.runModal()
+                }
+            }
+        }
+    }
+
+    private func refreshWorktreeList() {
+        guard let workspace = tabManager.selectedWorkspace else {
+            sidebarWorktrees = []
+            return
+        }
+        let currentDir = workspace.currentDirectory
+        guard !currentDir.isEmpty else {
+            sidebarWorktrees = []
+            return
+        }
+        Task { @MainActor in
+            do {
+                let worktreeManager = WorktreeManager()
+                let worktrees = try await worktreeManager.list(workingDirectory: currentDir)
+                sidebarWorktrees = worktrees
+                // Detect which branches are already merged into HEAD
+                let repoRoot = try await worktreeManager.gitRepoRoot(workingDirectory: currentDir)
+                mergedBranches = await worktreeManager.mergedBranches(repoPath: repoRoot)
+            } catch {
+                #if DEBUG
+                dlog("sidebar.worktrees.refresh.error \(error.localizedDescription)")
+                #endif
+                sidebarWorktrees = []
+                mergedBranches = []
+            }
+        }
+    }
+}
+
+/// Extracted row view that tracks its own hover state.
+private struct WorktreeRowContent: View {
+    let worktree: WorktreeManager.WorktreeInfo
+    let isCurrentWorktree: Bool
+    let isMerged: Bool
+    let abbreviatedPath: String
+    let onDoubleClick: () -> Void
+    let onDelete: (() -> Void)?
+
+    @State private var isHovered: Bool = false
+
+    private var isStale: Bool {
+        guard !worktree.isMain else { return false }
+        return !FileManager.default.fileExists(atPath: worktree.path) || isMerged
+    }
+
+    private var staleBadgeText: String {
+        if !FileManager.default.fileExists(atPath: worktree.path) {
+            return String(localized: "sidebar.worktrees.missing", defaultValue: "missing")
+        }
+        return String(localized: "sidebar.worktrees.merged", defaultValue: "merged")
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(
+                    isStale ? Color.red.opacity(0.6) :
+                    isCurrentWorktree ? .accentColor : .secondary
+                )
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(worktree.branch)
+                        .font(.system(size: 11, weight: isCurrentWorktree ? .semibold : .regular))
+                        .foregroundColor(
+                            isStale ? .secondary.opacity(0.5) :
+                            isCurrentWorktree ? .primary : .secondary
+                        )
+                        .lineLimit(1)
+                        .strikethrough(isStale)
+
+                    if isStale {
+                        Text(staleBadgeText)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.red.opacity(0.7))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.red.opacity(0.12))
+                            .cornerRadius(3)
+                    }
+                }
+                Text(abbreviatedPath)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(isStale ? 0.4 : 0.7))
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if worktree.isMain {
+                Text(String(localized: "sidebar.worktrees.main", defaultValue: "main"))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+
+            // Delete button — visible on hover for non-main worktrees, always visible for stale
+            if let onDelete, (isHovered || isStale) {
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(isStale ? .red.opacity(0.7) : .secondary.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .safeHelp(String(
+                    localized: "sidebar.worktrees.deleteTooltip",
+                    defaultValue: "Delete Worktree"
+                ))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            isCurrentWorktree ? Color.accentColor.opacity(0.12) :
+            isHovered ? Color.white.opacity(0.06) : Color.clear
+        )
+        .cornerRadius(4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onTapGesture(count: 2) {
+            onDoubleClick()
+        }
     }
 }
 
@@ -11317,6 +11643,8 @@ private struct TabItemView: View, Equatable {
                         .safeHelp(protectedWorkspaceTooltip)
                 }
 
+                worktreeIndicator(for: tab)
+
                 Text(tab.title)
                     .font(.system(size: 12.5, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
@@ -11505,6 +11833,7 @@ private struct TabItemView: View, Equatable {
                                     .underline()
                                     .lineLimit(1)
                                     .truncationMode(.tail)
+                                checksStatusDot(pullRequest.checks)
                                 Text(pullRequestStatusLabel(pullRequest.status, checks: pullRequest.checks))
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
@@ -11516,6 +11845,11 @@ private struct TabItemView: View, Equatable {
                         .safeHelp(String(localized: "sidebar.pullRequest.openTooltip", defaultValue: "Open \(pullRequest.label) #\(pullRequest.number)"))
                     }
                 }
+            }
+
+            // CI status row (shown below PR rows when CI data is available)
+            if detailVisibility.showsPullRequests {
+                ciStatusIndicator(for: tab)
             }
 
             // Ports row
@@ -11858,6 +12192,87 @@ private struct TabItemView: View, Equatable {
             markTabsUnread(targetIds)
         }
         .disabled(!hasReadNotifications(in: targetIds))
+
+    }
+
+    private func promptDeleteWorktree(for workspace: Workspace) {
+        guard let info = workspace.worktreeInfo else { return }
+
+        let alert = NSAlert()
+        alert.messageText = String(localized: "worktree.delete.title", defaultValue: "Delete Worktree")
+        alert.informativeText = String(
+            localized: "worktree.delete.message",
+            defaultValue: "Are you sure you want to delete the worktree for branch '\(info.branch)'?"
+        )
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "common.delete", defaultValue: "Delete"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task {
+            do {
+                try await workspace.removeWorktree(path: info.path, force: false)
+                workspace.detachWorktree()
+            } catch {
+                #if DEBUG
+                dlog("worktree.delete.error \(error.localizedDescription)")
+                #endif
+                // If uncommitted changes, offer force delete
+                if case WorktreeManager.WorktreeError.uncommittedChanges = error {
+                    let forceAlert = NSAlert()
+                    forceAlert.messageText = String(
+                        localized: "worktree.delete.uncommitted.title",
+                        defaultValue: "Uncommitted Changes"
+                    )
+                    forceAlert.informativeText = String(
+                        localized: "worktree.delete.uncommitted.message",
+                        defaultValue: "The worktree has uncommitted changes. Force delete?"
+                    )
+                    forceAlert.alertStyle = .critical
+                    forceAlert.addButton(withTitle: String(localized: "common.forceDelete", defaultValue: "Force Delete"))
+                    forceAlert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+                    guard forceAlert.runModal() == .alertFirstButtonReturn else { return }
+                    do {
+                        try await workspace.removeWorktree(path: info.path, force: true)
+                        workspace.detachWorktree()
+                    } catch {
+                        let failAlert = NSAlert()
+                        failAlert.messageText = String(
+                            localized: "worktree.delete.errorTitle",
+                            defaultValue: "Worktree Deletion Failed"
+                        )
+                        failAlert.informativeText = error.localizedDescription
+                        failAlert.alertStyle = .warning
+                        failAlert.runModal()
+                    }
+                } else {
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = String(
+                        localized: "worktree.delete.errorTitle",
+                        defaultValue: "Worktree Deletion Failed"
+                    )
+                    errorAlert.informativeText = error.localizedDescription
+                    errorAlert.alertStyle = .warning
+                    errorAlert.runModal()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func worktreeIndicator(for workspace: Workspace) -> some View {
+        if workspace.worktreeInfo != nil {
+            let worktreeTooltip = String(
+                localized: "sidebar.worktree.tooltip",
+                defaultValue: "Git worktree: \(workspace.worktreeInfo?.branch ?? "")"
+            )
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(activeSecondaryColor(0.8))
+                .safeHelp(worktreeTooltip)
+        }
     }
 
     private var selectionBackgroundColor: NSColor {
@@ -12277,13 +12692,134 @@ private struct TabItemView: View, Equatable {
 
     private func pullRequestStatusLabel(
         _ status: SidebarPullRequestStatus,
-        checks _: SidebarPullRequestChecksStatus?
+        checks: SidebarPullRequestChecksStatus?
     ) -> String {
+        let base: String
         switch status {
-        case .open: return String(localized: "sidebar.pullRequest.statusOpen", defaultValue: "open")
-        case .merged: return String(localized: "sidebar.pullRequest.statusMerged", defaultValue: "merged")
-        case .closed: return String(localized: "sidebar.pullRequest.statusClosed", defaultValue: "closed")
+        case .open: base = String(localized: "sidebar.pullRequest.statusOpen", defaultValue: "open")
+        case .merged: base = String(localized: "sidebar.pullRequest.statusMerged", defaultValue: "merged")
+        case .closed: base = String(localized: "sidebar.pullRequest.statusClosed", defaultValue: "closed")
         }
+        guard status == .open, let checks else { return base }
+        let checksSuffix: String
+        switch checks {
+        case .pass:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksPass", defaultValue: "passing")
+        case .fail:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksFail", defaultValue: "failing")
+        case .pending:
+            checksSuffix = String(localized: "sidebar.pullRequest.checksPending", defaultValue: "running")
+        }
+        return "\(base) \u{00B7} \(checksSuffix)"
+    }
+
+    @ViewBuilder
+    private func checksStatusDot(_ checks: SidebarPullRequestChecksStatus?) -> some View {
+        if let checks {
+            Circle()
+                .fill(checksStatusColor(checks))
+                .frame(width: 5, height: 5)
+                .safeHelp(checksStatusTooltip(checks))
+        }
+    }
+
+    private func checksStatusColor(_ checks: SidebarPullRequestChecksStatus) -> Color {
+        switch checks {
+        case .pass: return .green
+        case .fail: return .red
+        case .pending: return .yellow
+        }
+    }
+
+    private func checksStatusTooltip(_ checks: SidebarPullRequestChecksStatus) -> String {
+        switch checks {
+        case .pass:
+            return String(localized: "sidebar.ci.checksPassTooltip", defaultValue: "CI checks passing")
+        case .fail:
+            return String(localized: "sidebar.ci.checksFailTooltip", defaultValue: "CI checks failing")
+        case .pending:
+            return String(localized: "sidebar.ci.checksPendingTooltip", defaultValue: "CI checks running")
+        }
+    }
+
+    @ViewBuilder
+    private func ciStatusIndicator(for workspace: Workspace) -> some View {
+        if let poller = workspace.ciPoller, poller.status != .unknown {
+            Button(action: {
+                openCIRunURL(workspace: workspace)
+            }) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(ciStatusColor(poller.status))
+                        .frame(width: 5, height: 5)
+                    Text(ciStatusLabel(poller.status))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isActive ? .white.opacity(0.6) : .secondary)
+            }
+            .buttonStyle(.plain)
+            .safeHelp(ciStatusTooltip(poller.status))
+        }
+    }
+
+    private func ciStatusColor(_ status: CIStatusPoller.CIStatus) -> Color {
+        switch status {
+        case .passing: return .green
+        case .failing: return .red
+        case .running: return .yellow
+        case .none: return .gray
+        case .unknown: return .gray
+        }
+    }
+
+    private func ciStatusLabel(_ status: CIStatusPoller.CIStatus) -> String {
+        switch status {
+        case .passing:
+            return String(localized: "sidebar.ci.statusPassing", defaultValue: "CI passing")
+        case .failing:
+            return String(localized: "sidebar.ci.statusFailing", defaultValue: "CI failing")
+        case .running:
+            return String(localized: "sidebar.ci.statusRunning", defaultValue: "CI running")
+        case .none:
+            return String(localized: "sidebar.ci.statusNone", defaultValue: "No CI runs")
+        case .unknown:
+            return String(localized: "sidebar.ci.statusUnknown", defaultValue: "CI status unknown")
+        }
+    }
+
+    private func ciStatusTooltip(_ status: CIStatusPoller.CIStatus) -> String {
+        switch status {
+        case .passing:
+            return String(localized: "sidebar.ci.passingTooltip", defaultValue: "CI checks are passing. Click to open.")
+        case .failing:
+            return String(localized: "sidebar.ci.failingTooltip", defaultValue: "CI checks are failing. Click to open.")
+        case .running:
+            return String(localized: "sidebar.ci.runningTooltip", defaultValue: "CI checks are running. Click to open.")
+        case .none:
+            return String(localized: "sidebar.ci.noneTooltip", defaultValue: "No CI workflow runs found.")
+        case .unknown:
+            return String(localized: "sidebar.ci.unknownTooltip", defaultValue: "CI status is unknown.")
+        }
+    }
+
+    private func openCIRunURL(workspace: Workspace) {
+        updateSelection()
+        guard let urlString = workspace.ciPoller?.latestRunURL,
+              let url = URL(string: urlString) else { return }
+
+        if openSidebarPullRequestLinksInCmuxBrowser {
+            if tabManager.openBrowser(
+                inWorkspace: tab.id,
+                url: url,
+                preferSplitRight: true,
+                insertAtEnd: true
+            ) != nil {
+                return
+            }
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func logLevelIcon(_ level: SidebarLogLevel) -> String {

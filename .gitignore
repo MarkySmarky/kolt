@@ -1,3 +1,6 @@
+# Ghostty build deps (too large for git, rebuilt by setup.sh)
+vendor/ghostty-deps/
+
 # Xcode
 .build/
 build/

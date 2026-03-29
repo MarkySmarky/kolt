@@ -289,7 +289,8 @@ extension Workspace {
             statusEntries: statusSnapshots,
             logEntries: logSnapshots,
             progress: progressSnapshot,
-            gitBranch: gitBranchSnapshot
+            gitBranch: gitBranchSnapshot,
+            worktreePath: worktreeInfo?.path
         )
     }
 
@@ -337,6 +338,28 @@ extension Workspace {
         }
         progress = snapshot.progress.map { SidebarProgressState(value: $0.value, label: $0.label) }
         gitBranch = snapshot.gitBranch.map { SidebarGitBranchState(branch: $0.branch, isDirty: $0.isDirty) }
+
+        // Restore worktree association if persisted path still exists.
+        if let worktreePath = snapshot.worktreePath,
+           FileManager.default.fileExists(atPath: worktreePath) {
+            // Re-probe the worktree to get current commit info.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let worktrees = try await self.listWorktrees()
+                    let normalized = URL(fileURLWithPath: worktreePath).standardizedFileURL.path
+                    if let match = worktrees.first(where: {
+                        URL(fileURLWithPath: $0.path).standardizedFileURL.path == normalized
+                    }) {
+                        self.attachWorktree(match)
+                    }
+                } catch {
+                    #if DEBUG
+                    dlog("worktree.restore.error \(error.localizedDescription)")
+                    #endif
+                }
+            }
+        }
 
         recomputeListeningPorts()
 
@@ -468,6 +491,9 @@ extension Workspace {
             terminalSnapshot = nil
             browserSnapshot = nil
             markdownSnapshot = SessionMarkdownPanelSnapshot(filePath: markdownPanel.filePath)
+        case .diff:
+            // Diff panels are ephemeral and not persisted across sessions.
+            return nil
         }
 
         return SessionPanelSnapshot(
@@ -658,6 +684,9 @@ extension Workspace {
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id
+        case .diff:
+            // Diff panels are ephemeral and not restored from session snapshots.
+            return nil
         }
     }
 
@@ -4983,6 +5012,340 @@ enum SidebarPullRequestChecksStatus: String {
     case pending
 }
 
+// MARK: - CI Status Polling
+
+/// Polls GitHub Actions CI status for a given branch via the `gh` CLI.
+///
+/// All published state lives on `@MainActor`. The `gh` CLI process is spawned
+/// on a dedicated background queue to avoid blocking the main thread.
+@MainActor
+final class CIStatusPoller: ObservableObject {
+
+    // MARK: - Types
+
+    enum CIStatus: String, Codable {
+        case passing
+        case failing
+        case running
+        case none
+        case unknown
+    }
+
+    struct CIRunInfo: Codable, Equatable {
+        let status: String
+        let conclusion: String?
+        let name: String
+        let workflowName: String
+        let url: String
+    }
+
+    // MARK: - Published State
+
+    @Published private(set) var status: CIStatus = .unknown
+    @Published private(set) var runs: [CIRunInfo] = []
+    @Published private(set) var latestRunURL: String?
+
+    // MARK: - Configuration
+
+    nonisolated static let pollInterval: TimeInterval = 60
+
+    // MARK: - Private State
+
+    private var branch: String?
+    /// Timer is accessed from `deinit` and `stopTimer()` which may be nonisolated.
+    /// `DispatchSourceTimer.cancel()` is thread-safe.
+    nonisolated(unsafe) private var timer: DispatchSourceTimer?
+    private var isPolling: Bool = false
+    private let ghAvailable: Bool
+
+    private static let pollingQueue = DispatchQueue(
+        label: "com.kolt.ci-poller",
+        qos: .utility
+    )
+
+    // MARK: - Init
+
+    init() {
+        self.ghAvailable = Self.checkGhAvailability()
+        if !ghAvailable {
+            status = .unknown
+            #if DEBUG
+            dlog("ci-poller: gh CLI not available, CI polling disabled")
+            #endif
+        }
+    }
+
+    deinit {
+        stopTimer()
+    }
+
+    // MARK: - Public API
+
+    func start(branch: String) {
+        guard ghAvailable else { return }
+
+        let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            stop()
+            return
+        }
+
+        let branchChanged = self.branch != trimmed
+        self.branch = trimmed
+
+        if branchChanged {
+            status = .unknown
+            runs = []
+            latestRunURL = nil
+        }
+
+        guard !isPolling else {
+            if branchChanged { refresh() }
+            return
+        }
+
+        isPolling = true
+
+        #if DEBUG
+        dlog("ci-poller: start polling branch=\(trimmed)")
+        #endif
+
+        let initialDelay: TimeInterval = 5
+        Self.pollingQueue.asyncAfter(deadline: .now() + initialDelay) { [weak self] in
+            self?.performPoll()
+        }
+
+        scheduleTimer()
+    }
+
+    func stop() {
+        guard isPolling else { return }
+        isPolling = false
+        branch = nil
+        stopTimer()
+
+        #if DEBUG
+        dlog("ci-poller: stopped")
+        #endif
+    }
+
+    func refresh() {
+        guard ghAvailable, let branch, !branch.isEmpty else { return }
+
+        #if DEBUG
+        dlog("ci-poller: manual refresh for branch=\(branch)")
+        #endif
+
+        Self.pollingQueue.async { [weak self] in
+            self?.performPoll()
+        }
+    }
+
+    // MARK: - Timer Management
+
+    private func scheduleTimer() {
+        stopTimer()
+        let timer = DispatchSource.makeTimerSource(queue: Self.pollingQueue)
+        timer.schedule(
+            deadline: .now() + Self.pollInterval,
+            repeating: Self.pollInterval,
+            leeway: .seconds(5)
+        )
+        timer.setEventHandler { [weak self] in
+            self?.performPoll()
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private nonisolated func stopTimer() {
+        timer?.cancel()
+    }
+
+    // MARK: - Polling (background queue)
+
+    private nonisolated func performPoll() {
+        guard let branch = DispatchQueue.main.sync(execute: { self.branch }),
+              !branch.isEmpty else {
+            return
+        }
+
+        let ghPath = Self.resolveGhPath()
+        guard let ghPath else {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh path not found during poll")
+            }
+            #endif
+            return
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: ghPath)
+        process.arguments = [
+            "run", "list",
+            "--branch", branch,
+            "--limit", "5",
+            "--json", "status,conclusion,name,workflowName,url"
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh process launch failed: \(error.localizedDescription)")
+            }
+            #endif
+            return
+        }
+
+        guard process.terminationStatus == 0 else {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: gh exited with status \(process.terminationStatus)")
+            }
+            #endif
+            return
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+
+        guard !data.isEmpty else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyResults(runs: [], status: .none)
+            }
+            return
+        }
+
+        let decoder = JSONDecoder()
+        do {
+            let decoded = try decoder.decode([CIRunInfo].self, from: data)
+            let aggregated = Self.aggregateStatus(from: decoded)
+            let latestURL = decoded.first?.url
+
+            DispatchQueue.main.async { [weak self] in
+                self?.applyResults(runs: decoded, status: aggregated, latestURL: latestURL)
+            }
+        } catch {
+            #if DEBUG
+            DispatchQueue.main.async {
+                dlog("ci-poller: JSON decode failed: \(error.localizedDescription)")
+            }
+            #endif
+        }
+    }
+
+    // MARK: - Result Application (main thread)
+
+    private func applyResults(runs: [CIRunInfo], status: CIStatus, latestURL: String? = nil) {
+        let changed = self.runs != runs || self.status != status
+        if changed {
+            self.runs = runs
+            self.status = status
+            self.latestRunURL = latestURL
+
+            #if DEBUG
+            dlog("ci-poller: updated status=\(status.rawValue) runs=\(runs.count)")
+            #endif
+        }
+    }
+
+    // MARK: - Status Aggregation
+
+    nonisolated static func aggregateStatus(from runs: [CIRunInfo]) -> CIStatus {
+        guard !runs.isEmpty else { return .none }
+
+        var hasRunning = false
+        var hasFailed = false
+        var hasPassed = false
+
+        for run in runs {
+            let status = run.status.lowercased()
+            let conclusion = run.conclusion?.lowercased()
+
+            if status == "in_progress" || status == "queued" || status == "waiting" || status == "pending" {
+                hasRunning = true
+            } else if status == "completed" {
+                switch conclusion {
+                case "success":
+                    hasPassed = true
+                case "failure", "timed_out", "cancelled":
+                    hasFailed = true
+                default:
+                    break
+                }
+            }
+        }
+
+        if hasRunning { return .running }
+        if hasFailed { return .failing }
+        if hasPassed { return .passing }
+        return .unknown
+    }
+
+    // MARK: - gh CLI Resolution
+
+    private nonisolated static func checkGhAvailability() -> Bool {
+        resolveGhPath() != nil
+    }
+
+    private nonisolated static func resolveGhPath() -> String? {
+        let candidates = [
+            "/usr/local/bin/gh",
+            "/opt/homebrew/bin/gh",
+            "/usr/bin/gh"
+        ]
+        for candidate in candidates {
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = ["gh"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let path = output, !path.isEmpty,
+              FileManager.default.isExecutableFile(atPath: path) else {
+            return nil
+        }
+        return path
+    }
+
+    // MARK: - Mapping to Sidebar PR Checks Status
+
+    var checksStatus: SidebarPullRequestChecksStatus? {
+        switch status {
+        case .passing:
+            return .pass
+        case .failing:
+            return .fail
+        case .running:
+            return .pending
+        case .none, .unknown:
+            return nil
+        }
+    }
+}
+
 private func normalizedSidebarBranchName(_ branch: String?) -> String? {
     guard let branch else { return nil }
     let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5446,6 +5809,10 @@ final class Workspace: Identifiable, ObservableObject {
     /// Mapping from bonsplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
 
+    /// Shared GitWatcher instances keyed by working directory.
+    /// All DiffPanels in the same workspace sharing a working directory reuse one watcher.
+    private var diffWatchers: [String: GitWatcher] = [:]
+
     /// Subscriptions for panel updates (e.g., browser title changes)
     private var panelSubscriptions: [UUID: AnyCancellable] = [:]
 
@@ -5531,6 +5898,9 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var remoteLastHeartbeatAt: Date?
     @Published var listeningPorts: [Int] = []
     @Published private(set) var activeRemoteTerminalSessionCount: Int = 0
+    @Published var worktreeInfo: WorktreeManager.WorktreeInfo?
+    @Published var ciPoller: CIStatusPoller?
+    private var ciPollerSubscription: AnyCancellable?
     var surfaceTTYNames: [UUID: String] = [:]
     private var remoteSessionController: WorkspaceRemoteSessionController?
     fileprivate var activeRemoteSessionControllerID: UUID?
@@ -5589,6 +5959,7 @@ final class Workspace: Identifiable, ObservableObject {
         static let terminal = "terminal"
         static let browser = "browser"
         static let markdown = "markdown"
+        static let diff = "diff"
     }
 
     enum PanelShellActivityState: String {
@@ -6051,6 +6422,40 @@ final class Workspace: Identifiable, ObservableObject {
         panelSubscriptions[markdownPanel.id] = subscription
     }
 
+    private func installDiffPanelSubscription(_ diffPanel: DiffPanel) {
+        let subscription = diffPanel.$displayTitle
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak diffPanel] newTitle in
+                guard let self,
+                      let diffPanel,
+                      let tabId = self.surfaceIdFromPanelId(diffPanel.id) else { return }
+                guard let existing = self.bonsplitController.tab(tabId) else { return }
+
+                if self.panelTitles[diffPanel.id] != newTitle {
+                    self.panelTitles[diffPanel.id] = newTitle
+                }
+                let resolvedTitle = self.resolvedPanelTitle(panelId: diffPanel.id, fallback: newTitle)
+                guard existing.title != resolvedTitle else { return }
+                self.bonsplitController.updateTab(
+                    tabId,
+                    title: resolvedTitle,
+                    hasCustomTitle: self.panelCustomTitles[diffPanel.id] != nil
+                )
+            }
+        panelSubscriptions[diffPanel.id] = subscription
+    }
+
+    /// Stops and removes the shared GitWatcher for the given working directory
+    /// if no remaining DiffPanels reference it.
+    private func pruneUnusedDiffWatcher(workingDirectory: String) {
+        let remainingDiffPanels = panels.values.compactMap { $0 as? DiffPanel }
+        let stillUsed = remainingDiffPanels.contains { $0.workingDirectory == workingDirectory }
+        if !stillUsed, let watcher = diffWatchers.removeValue(forKey: workingDirectory) {
+            watcher.stop()
+        }
+    }
+
     private func browserRemoteWorkspaceStatusSnapshot() -> BrowserRemoteWorkspaceStatus? {
         guard let target = remoteDisplayTarget else { return nil }
         return BrowserRemoteWorkspaceStatus(
@@ -6088,6 +6493,10 @@ final class Workspace: Identifiable, ObservableObject {
         panels[panelId] as? MarkdownPanel
     }
 
+    func diffPanel(for panelId: UUID) -> DiffPanel? {
+        panels[panelId] as? DiffPanel
+    }
+
     private func surfaceKind(for panel: any Panel) -> String {
         switch panel.panelType {
         case .terminal:
@@ -6096,6 +6505,8 @@ final class Workspace: Identifiable, ObservableObject {
             return SurfaceKind.browser
         case .markdown:
             return SurfaceKind.markdown
+        case .diff:
+            return SurfaceKind.diff
         }
     }
 
@@ -6416,6 +6827,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
         if panelId == focusedPanelId {
             gitBranch = state
+            reconcileCIPolling()
         }
     }
 
@@ -6425,6 +6837,7 @@ final class Workspace: Identifiable, ObservableObject {
         if panelId == focusedPanelId {
             gitBranch = nil
             pullRequest = nil
+            stopCIPolling()
         }
     }
 
@@ -7891,6 +8304,77 @@ final class Workspace: Identifiable, ObservableObject {
         return markdownPanel
     }
 
+    func newDiffSplit(
+        from panelId: UUID,
+        orientation: SplitOrientation,
+        insertFirst: Bool = false,
+        workingDirectory: String,
+        focus: Bool = true
+    ) -> DiffPanel? {
+        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
+        var sourcePaneId: PaneID?
+        for paneId in bonsplitController.allPaneIds {
+            let tabs = bonsplitController.tabs(inPane: paneId)
+            if tabs.contains(where: { $0.id == sourceTabId }) {
+                sourcePaneId = paneId
+                break
+            }
+        }
+
+        guard let paneId = sourcePaneId else { return nil }
+
+        // Reuse an existing GitWatcher for this working directory, or create one.
+        let watcher: GitWatcher
+        if let existing = diffWatchers[workingDirectory] {
+            watcher = existing
+        } else {
+            watcher = GitWatcher(workingDirectory: workingDirectory)
+            diffWatchers[workingDirectory] = watcher
+        }
+
+        let diffPanel = DiffPanel(workspaceId: id, workingDirectory: workingDirectory, gitWatcher: watcher)
+        panels[diffPanel.id] = diffPanel
+        panelTitles[diffPanel.id] = diffPanel.displayTitle
+
+        let newTab = Bonsplit.Tab(
+            title: diffPanel.displayTitle,
+            icon: diffPanel.displayIcon,
+            kind: SurfaceKind.diff,
+            isDirty: diffPanel.isDirty,
+            isLoading: false,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = diffPanel.id
+        let previousFocusedPanelId = focusedPanelId
+
+        isProgrammaticSplit = true
+        defer { isProgrammaticSplit = false }
+        guard bonsplitController.splitPane(paneId, orientation: orientation, withTab: newTab, insertFirst: insertFirst) != nil else {
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            panels.removeValue(forKey: diffPanel.id)
+            panelTitles.removeValue(forKey: diffPanel.id)
+            return nil
+        }
+
+        let previousHostedView = focusedTerminalPanel?.hostedView
+        if focus {
+            previousHostedView?.suppressReparentFocus()
+            focusPanel(diffPanel.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                previousHostedView?.clearSuppressReparentFocus()
+            }
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: diffPanel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        installDiffPanelSubscription(diffPanel)
+        return diffPanel
+    }
+
     /// Tear down all panels in this workspace, freeing their Ghostty surfaces.
     /// Called before the workspace is removed from TabManager to ensure child
     /// processes receive SIGHUP even if ARC deallocation is delayed.
@@ -7901,6 +8385,12 @@ final class Workspace: Identifiable, ObservableObject {
             PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
             panel.close()
         }
+
+        // Stop all shared GitWatchers since no panels remain.
+        for (_, watcher) in diffWatchers {
+            watcher.stop()
+        }
+        diffWatchers.removeAll(keepingCapacity: false)
 
         panels.removeAll(keepingCapacity: false)
         surfaceIdToPanelId.removeAll(keepingCapacity: false)
@@ -9738,6 +10228,58 @@ final class Workspace: Identifiable, ObservableObject {
         return moved
     }
 
+    // MARK: - Worktree Management
+
+    private static let worktreeManager = WorktreeManager()
+
+    /// Associates this workspace with a worktree and updates its working directory.
+    func attachWorktree(_ info: WorktreeManager.WorktreeInfo) {
+        worktreeInfo = info
+        if !info.isMain {
+            currentDirectory = info.path
+        }
+        #if DEBUG
+        dlog("worktree.attach ws=\(id.uuidString.prefix(5)) branch=\(info.branch) path=\(info.path)")
+        #endif
+    }
+
+    /// Clears the worktree association from this workspace.
+    func detachWorktree() {
+        #if DEBUG
+        if let info = worktreeInfo {
+            dlog("worktree.detach ws=\(id.uuidString.prefix(5)) branch=\(info.branch)")
+        }
+        #endif
+        worktreeInfo = nil
+    }
+
+    /// Lists all worktrees for the repository at this workspace's current directory.
+    func listWorktrees() async throws -> [WorktreeManager.WorktreeInfo] {
+        try await Self.worktreeManager.list(workingDirectory: currentDirectory)
+    }
+
+    /// Creates a new worktree with the given branch name.
+    func createWorktree(
+        branch: String,
+        baseBranch: String?,
+        directory: String?
+    ) async throws -> WorktreeManager.WorktreeInfo {
+        try await Self.worktreeManager.add(
+            branch: branch,
+            baseBranch: baseBranch,
+            directory: directory,
+            workingDirectory: currentDirectory
+        )
+    }
+
+    /// Removes the worktree at the given path.
+    func removeWorktree(path: String, force: Bool) async throws {
+        try await Self.worktreeManager.remove(
+            path: path,
+            force: force,
+            workingDirectory: currentDirectory
+        )
+    }
 }
 
 // MARK: - BonsplitDelegate
@@ -10127,7 +10669,7 @@ extension Workspace: BonsplitDelegate {
         switch intent {
         case .browser(.addressBar), .browser(.findField), .terminal(.findField):
             return true
-        case .panel, .browser(.webView), .terminal(.surface):
+        case .panel, .browser(.webView), .terminal(.surface), .diff:
             return false
         }
     }
@@ -10324,6 +10866,9 @@ extension Workspace: BonsplitDelegate {
             panel?.close()
         }
 
+        // Capture diff panel working directory before removal for watcher cleanup.
+        let closedDiffWorkingDir = (panel as? DiffPanel)?.workingDirectory
+
         panels.removeValue(forKey: panelId)
         untrackRemoteTerminalSurface(panelId)
         pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
@@ -10341,6 +10886,10 @@ extension Workspace: BonsplitDelegate {
         surfaceTTYNames.removeValue(forKey: panelId)
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
         PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
+
+        if let closedDiffWorkingDir {
+            pruneUnusedDiffWatcher(workingDirectory: closedDiffWorkingDir)
+        }
         terminalInheritanceFontPointsByPanelId.removeValue(forKey: panelId)
         if lastTerminalConfigInheritancePanelId == panelId {
             lastTerminalConfigInheritancePanelId = nil
@@ -10476,6 +11025,14 @@ extension Workspace: BonsplitDelegate {
         let shouldScheduleFocusReconcile = !isDetachingCloseTransaction
 
         if !closedPanelIds.isEmpty {
+            // Collect diff panel working directories before removal for watcher cleanup.
+            var closedDiffWorkingDirs: [String] = []
+            for panelId in closedPanelIds {
+                if let diffPanel = panels[panelId] as? DiffPanel {
+                    closedDiffWorkingDirs.append(diffPanel.workingDirectory)
+                }
+            }
+
             for panelId in closedPanelIds {
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
@@ -10494,6 +11051,10 @@ extension Workspace: BonsplitDelegate {
                 surfaceListeningPorts.removeValue(forKey: panelId)
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
                 PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
+            }
+
+            for workingDir in closedDiffWorkingDirs {
+                pruneUnusedDiffWatcher(workingDirectory: workingDir)
             }
 
             let closedSet = Set(closedPanelIds)
@@ -10790,4 +11351,68 @@ extension Workspace: BonsplitDelegate {
     }
 
     // No post-close polling refresh loop: we rely on view invariants and Ghostty's wakeups.
+
+    // MARK: - CI Status Polling
+
+    /// Call when the focused panel's git branch may have changed.
+    /// Creates, starts, or stops the `CIStatusPoller` based on the current branch.
+    func reconcileCIPolling() {
+        guard let branchName = gitBranch?.branch,
+              !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            stopCIPolling()
+            return
+        }
+
+        if ciPoller == nil {
+            let poller = CIStatusPoller()
+            ciPoller = poller
+            ciPollerSubscription = poller.$status
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.propagateCIStatusToPullRequests()
+                }
+        }
+
+        ciPoller?.start(branch: branchName)
+    }
+
+    /// Stops CI polling and cleans up subscriptions.
+    func stopCIPolling() {
+        ciPollerSubscription?.cancel()
+        ciPollerSubscription = nil
+        ciPoller?.stop()
+        ciPoller = nil
+    }
+
+    /// When the CI poller produces new results, propagate the checks status
+    /// to all panel pull requests that share the same branch.
+    private func propagateCIStatusToPullRequests() {
+        guard let poller = ciPoller,
+              let branchName = gitBranch?.branch else { return }
+
+        let checksStatus = poller.checksStatus
+
+        for (panelId, prState) in panelPullRequests {
+            guard prState.status == .open else { continue }
+            let prBranch = normalizedSidebarBranchName(prState.branch)
+            let currentBranch = normalizedSidebarBranchName(branchName)
+            if prBranch == currentBranch {
+                let updated = SidebarPullRequestState(
+                    number: prState.number,
+                    label: prState.label,
+                    url: prState.url,
+                    status: prState.status,
+                    branch: prState.branch,
+                    checks: checksStatus ?? prState.checks
+                )
+                if panelPullRequests[panelId] != updated {
+                    panelPullRequests[panelId] = updated
+                    if panelId == focusedPanelId {
+                        pullRequest = updated
+                    }
+                }
+            }
+        }
+    }
 }
