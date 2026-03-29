@@ -3,9 +3,9 @@ import AppKit
 import WebKit
 
 #if canImport(cmux_DEV)
-@testable import cmux_DEV
+@testable import Kolt_DEV
 #elseif canImport(cmux)
-@testable import cmux
+@testable import Kolt
 #endif
 
 final class SidebarPathFormatterTests: XCTestCase {

@@ -1,9 +1,9 @@
 import XCTest
 
 #if canImport(cmux)
-@testable import cmux
+@testable import Kolt
 #elseif canImport(cmux_DEV)
-@testable import cmux_DEV
+@testable import Kolt_DEV
 #endif
 
 final class WorkspaceRemoteConnectionTests: XCTestCase {
