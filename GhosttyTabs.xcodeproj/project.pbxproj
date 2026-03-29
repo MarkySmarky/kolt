@@ -39,6 +39,7 @@
 		K0LT0006 /* DiffPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0005 /* DiffPanelView.swift */; };
 		K0LT0008 /* WorktreeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0007 /* WorktreeManager.swift */; };
 		K0LT0011 /* diff-viewer in Resources */ = {isa = PBXBuildFile; fileRef = K0LT0010 /* diff-viewer */; };
+		K0LT0021 /* WorkspaceCreationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = K0LT0020 /* WorkspaceCreationSheet.swift */; };
 		K0LT0010 /* diff-viewer */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "diff-viewer"; path = "web/diff-viewer"; sourceTree = SOURCE_ROOT; };
 		A5001290 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = A5001291 /* MarkdownUI */; };
 		A5001405 /* PanelContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001415 /* PanelContentView.swift */; };
@@ -225,6 +226,7 @@
 		K0LT0003 /* DiffPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/DiffPanel.swift; sourceTree = "<group>"; };
 		K0LT0005 /* DiffPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/DiffPanelView.swift; sourceTree = "<group>"; };
 		K0LT0007 /* WorktreeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeManager.swift; sourceTree = "<group>"; };
+		K0LT0020 /* WorkspaceCreationSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCreationSheet.swift; sourceTree = "<group>"; };
 		A5001416 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		A5001417 /* WorkspaceContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContentView.swift; sourceTree = "<group>"; };
 		A5001090 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -449,6 +451,7 @@
 				A5001090 /* AppDelegate.swift */,
 					K0LT0001 /* GitWatcher.swift */,
 					K0LT0007 /* WorktreeManager.swift */,
+					K0LT0020 /* WorkspaceCreationSheet.swift */,
 					K0LT0010 /* diff-viewer */,
 				A5001091 /* NotificationsPage.swift */,
 				A5001092 /* TerminalNotificationStore.swift */,
@@ -769,6 +772,7 @@
 				K0LT0004 /* DiffPanel.swift in Sources */,
 				K0LT0006 /* DiffPanelView.swift in Sources */,
 				K0LT0008 /* WorktreeManager.swift in Sources */,
+				K0LT0021 /* WorkspaceCreationSheet.swift in Sources */,
 				A5001500 /* CmuxWebView.swift in Sources */,
 				A5001405 /* PanelContentView.swift in Sources */,
 				A5001201 /* UpdateController.swift in Sources */,
