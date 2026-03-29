@@ -56,10 +56,20 @@ else
         echo "==> Seeding cache from existing local GhosttyKit.xcframework (SHA matches)"
     else
         echo "==> Building GhosttyKit.xcframework (this may take a few minutes)..."
+
+        # Xcode 26.4's libtool (cctools_ld-1266.8) silently drops misaligned
+        # 64-bit mach-o members from Zig-produced static archives, causing
+        # undefined symbol errors (FreeType, Oniguruma, etc.) at link time.
+        # Work around by shadowing libtool with an ar-based wrapper.
+        LIBTOOL_WRAPPER_DIR="$(mktemp -d)"
+        ln -s "$SCRIPT_DIR/libtool-static-wrapper.sh" "$LIBTOOL_WRAPPER_DIR/libtool"
+
         (
             cd ghostty
-            zig build -Demit-xcframework=true -Dxcframework-target=universal -Doptimize=ReleaseFast
+            PATH="$LIBTOOL_WRAPPER_DIR:$PATH" \
+                zig build -Demit-xcframework=true -Demit-macos-app=false -Dxcframework-target=universal -Doptimize=ReleaseFast
         )
+        rm -rf "$LIBTOOL_WRAPPER_DIR"
         # Stamp the build output with the SHA it was built from
         echo "$GHOSTTY_SHA" > "$LOCAL_SHA_STAMP"
     fi

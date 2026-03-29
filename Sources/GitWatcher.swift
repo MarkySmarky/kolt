@@ -102,11 +102,18 @@ final class GitWatcher: ObservableObject {
         }
     }
 
-    /// Revert a file: `git checkout -- <path>`
+    /// Revert a file: `git checkout -- <path>` for tracked files, delete for untracked.
     func revertFile(_ path: String, completion: @escaping (Bool) -> Void) {
         gitQueue.async { [weak self] in
             guard let self else { return }
-            _ = self.runGitCommand(["checkout", "--", path])
+            let tracked = self.runGitCommand(["ls-files", path])
+            if tracked.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Untracked file — delete it
+                let fullPath = (self.workingDirectory as NSString).appendingPathComponent(path)
+                try? FileManager.default.removeItem(atPath: fullPath)
+            } else {
+                _ = self.runGitCommand(["checkout", "--", path])
+            }
             self.refreshBothLists(completion: completion)
         }
     }
@@ -297,10 +304,25 @@ final class GitWatcher: ObservableObject {
                 deletions: stats.deletions
             ))
         }
+
+        // Append untracked files for unstaged view
+        if !staged {
+            let untrackedOutput = runGitCommand(["ls-files", "--others", "--exclude-standard"])
+            for line in untrackedOutput.components(separatedBy: "\n") where !line.isEmpty {
+                files.append(ChangedFile(
+                    path: line,
+                    status: "?",
+                    insertions: 0,
+                    deletions: 0
+                ))
+            }
+        }
+
         return files
     }
 
     /// Runs `git diff <file>` for a specific file and returns the unified diff output.
+    /// For untracked files, generates a diff showing the full file content as additions.
     /// - Parameters:
     ///   - path: The file path relative to the working directory.
     ///   - staged: When `true`, shows the staged (cached) diff.
@@ -310,7 +332,16 @@ final class GitWatcher: ObservableObject {
             args.append("--cached")
         }
         args.append(contentsOf: ["--", path])
-        return runGitCommand(args)
+        let output = runGitCommand(args)
+
+        // For untracked files, git diff produces no output — generate a full-file diff instead
+        if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !staged {
+            let tracked = runGitCommand(["ls-files", path])
+            if tracked.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return runGitCommand(["diff", "--no-index", "/dev/null", path])
+            }
+        }
+        return output
     }
 
     /// Runs `git rev-parse --abbrev-ref HEAD` to get the current branch name.

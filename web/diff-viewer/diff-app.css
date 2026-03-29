@@ -112,6 +112,7 @@ html, body {
 .file-item .status-badge.status-A { color: var(--status-added); background: rgba(78, 197, 106, 0.15); }
 .file-item .status-badge.status-D { color: var(--status-deleted); background: rgba(248, 81, 73, 0.15); }
 .file-item .status-badge.status-R { color: var(--status-renamed); background: rgba(224, 153, 86, 0.15); }
+.file-item .status-badge.status-\? { color: #8b8b8b; background: rgba(150, 150, 150, 0.15); }
 
 .file-item .file-name {
     flex: 1;
