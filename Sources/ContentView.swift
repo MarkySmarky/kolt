@@ -8639,6 +8639,7 @@ struct VerticalTabsSidebar: View {
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
     @State private var sidebarWorktrees: [WorktreeManager.WorktreeInfo] = []
+    @State private var mergedBranches: Set<String> = []
     @State private var worktreesSectionCollapsed: Bool = false
     @State private var isWorkspaceCreationSheetPresented: Bool = false
     @AppStorage(SidebarWorkspaceDetailSettings.hideAllDetailsKey)
@@ -8832,6 +8833,9 @@ struct VerticalTabsSidebar: View {
         .onChange(of: tabManager.selectedTabId) { _ in
             refreshWorktreeList()
         }
+        .onChange(of: tabManager.selectedWorkspace?.currentDirectory) { _ in
+            refreshWorktreeList()
+        }
         .onDisappear {
             modifierKeyMonitor.stop()
             dragAutoScrollController.stop()
@@ -8941,48 +8945,14 @@ struct VerticalTabsSidebar: View {
         let isCurrentWorktree = tabManager.selectedWorkspace?.worktreeInfo?.path == worktree.path
         let abbreviatedPath = abbreviateWorktreePath(worktree.path)
 
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(isCurrentWorktree ? .accentColor : .secondary)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(worktree.branch)
-                    .font(.system(size: 11, weight: isCurrentWorktree ? .semibold : .regular))
-                    .foregroundColor(isCurrentWorktree ? .primary : .secondary)
-                    .lineLimit(1)
-                Text(abbreviatedPath)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.7))
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            if worktree.isMain {
-                Text(String(localized: "sidebar.worktrees.main", defaultValue: "main"))
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary.opacity(0.6))
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(isCurrentWorktree ? Color.accentColor.opacity(0.12) : Color.clear)
-        .cornerRadius(4)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            switchToWorktree(worktree)
-        }
-        .contextMenu {
-            if !worktree.isMain {
-                Button(String(
-                    localized: "contextMenu.deleteWorktree",
-                    defaultValue: "Delete Worktree"
-                )) {
-                    sidebarDeleteWorktree(worktree)
-                }
-            }
-        }
+        WorktreeRowContent(
+            worktree: worktree,
+            isCurrentWorktree: isCurrentWorktree,
+            isMerged: !worktree.isMain && mergedBranches.contains(worktree.branch),
+            abbreviatedPath: abbreviatedPath,
+            onDoubleClick: { switchToWorktree(worktree) },
+            onDelete: worktree.isMain ? nil : { [worktree] in sidebarDeleteWorktree(worktree) }
+        )
     }
 
     private func abbreviateWorktreePath(_ path: String) -> String {
@@ -9104,14 +9074,117 @@ struct VerticalTabsSidebar: View {
             do {
                 let worktreeManager = WorktreeManager()
                 let worktrees = try await worktreeManager.list(workingDirectory: currentDir)
-                // Only show the section if there are multiple worktrees (more than just the main one)
-                sidebarWorktrees = worktrees.count > 1 ? worktrees : []
+                sidebarWorktrees = worktrees
+                // Detect which branches are already merged into HEAD
+                let repoRoot = try await worktreeManager.gitRepoRoot(workingDirectory: currentDir)
+                mergedBranches = await worktreeManager.mergedBranches(repoPath: repoRoot)
             } catch {
                 #if DEBUG
                 dlog("sidebar.worktrees.refresh.error \(error.localizedDescription)")
                 #endif
                 sidebarWorktrees = []
+                mergedBranches = []
             }
+        }
+    }
+}
+
+/// Extracted row view that tracks its own hover state.
+private struct WorktreeRowContent: View {
+    let worktree: WorktreeManager.WorktreeInfo
+    let isCurrentWorktree: Bool
+    let isMerged: Bool
+    let abbreviatedPath: String
+    let onDoubleClick: () -> Void
+    let onDelete: (() -> Void)?
+
+    @State private var isHovered: Bool = false
+
+    private var isStale: Bool {
+        guard !worktree.isMain else { return false }
+        return !FileManager.default.fileExists(atPath: worktree.path) || isMerged
+    }
+
+    private var staleBadgeText: String {
+        if !FileManager.default.fileExists(atPath: worktree.path) {
+            return String(localized: "sidebar.worktrees.missing", defaultValue: "missing")
+        }
+        return String(localized: "sidebar.worktrees.merged", defaultValue: "merged")
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(
+                    isStale ? Color.red.opacity(0.6) :
+                    isCurrentWorktree ? .accentColor : .secondary
+                )
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(worktree.branch)
+                        .font(.system(size: 11, weight: isCurrentWorktree ? .semibold : .regular))
+                        .foregroundColor(
+                            isStale ? .secondary.opacity(0.5) :
+                            isCurrentWorktree ? .primary : .secondary
+                        )
+                        .lineLimit(1)
+                        .strikethrough(isStale)
+
+                    if isStale {
+                        Text(staleBadgeText)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.red.opacity(0.7))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.red.opacity(0.12))
+                            .cornerRadius(3)
+                    }
+                }
+                Text(abbreviatedPath)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(isStale ? 0.4 : 0.7))
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if worktree.isMain {
+                Text(String(localized: "sidebar.worktrees.main", defaultValue: "main"))
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary.opacity(0.6))
+            }
+
+            // Delete button — visible on hover for non-main worktrees, always visible for stale
+            if let onDelete, (isHovered || isStale) {
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(isStale ? .red.opacity(0.7) : .secondary.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .safeHelp(String(
+                    localized: "sidebar.worktrees.deleteTooltip",
+                    defaultValue: "Delete Worktree"
+                ))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            isCurrentWorktree ? Color.accentColor.opacity(0.12) :
+            isHovered ? Color.white.opacity(0.06) : Color.clear
+        )
+        .cornerRadius(4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .onTapGesture(count: 2) {
+            onDoubleClick()
         }
     }
 }
