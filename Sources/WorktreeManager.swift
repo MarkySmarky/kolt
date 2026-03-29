@@ -135,6 +135,20 @@ final class WorktreeManager {
         return "main"
     }
 
+    /// Returns the set of branch names that are fully merged into HEAD at the given repo path.
+    func mergedBranches(repoPath: String) async -> Set<String> {
+        guard let output = try? await runGit(
+            ["branch", "--merged", "HEAD", "--format=%(refname:short)"],
+            in: repoPath
+        ) else {
+            return []
+        }
+        let branches = output.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return Set(branches)
+    }
+
     /// Lists all branches (local + remote, deduplicated, sorted alphabetically).
     func listBranches(repoPath: String) async -> [String] {
         guard let output = try? await runGit(
@@ -240,7 +254,19 @@ final class WorktreeManager {
             args.append("--force")
         }
         args.append(path)
-        _ = try await runGit(args, in: repoRoot)
+        do {
+            _ = try await runGit(args, in: repoRoot)
+        } catch {
+            // git worktree remove fails on worktrees with submodules.
+            // Fallback: delete the directory and prune.
+            let errorMessage = "\(error)"
+            if errorMessage.contains("submodules") || errorMessage.contains("cannot be moved or removed") {
+                try FileManager.default.removeItem(atPath: path)
+                _ = try await runGit(["worktree", "prune"], in: repoRoot)
+            } else {
+                throw error
+            }
+        }
     }
 
     // MARK: - Slug Utility
@@ -256,7 +282,7 @@ final class WorktreeManager {
 
     // MARK: - Private Helpers
 
-    private func gitRepoRoot(workingDirectory: String) async throws -> String {
+    func gitRepoRoot(workingDirectory: String) async throws -> String {
         let output = try await runGit(
             ["rev-parse", "--show-toplevel"],
             in: workingDirectory
