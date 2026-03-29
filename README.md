@@ -4,6 +4,15 @@ A fork of [cmux](https://github.com/manaflow-ai/cmux) that adds a live diff view
 
 Built on Ghostty (libghostty), Swift/AppKit, macOS 14+.
 
+## Download
+
+| | |
+|---|---|
+| **Apple Silicon** (M1/M2/M3/M4) | [Kolt-Apple-Silicon.dmg](https://github.com/MarkySmarky/kolt/releases/latest/download/Kolt-Apple-Silicon.dmg) |
+| **Intel** | [Kolt-Intel.dmg](https://github.com/MarkySmarky/kolt/releases/latest/download/Kolt-Intel.dmg) |
+
+Open the `.dmg` and drag Kolt to Applications. On first launch, right-click → Open to bypass Gatekeeper (the app is not notarized).
+
 ## What's added
 
 **DiffPanel** (`Cmd+Shift+K`) — VS Code-style source control panel as a split pane. Staged/unstaged sections with per-file stage/discard actions, resizable file tree, live-updating diffs via FSEvents.
@@ -12,7 +21,7 @@ Built on Ghostty (libghostty), Swift/AppKit, macOS 14+.
 
 **CI Status** — GitHub Actions status in the sidebar per workspace. Polls via `gh` CLI, integrates with existing PR status. Click to open the Actions run.
 
-## Build
+## Build from source
 
 Requires macOS 14+, Xcode 15+, Zig.
 
@@ -26,4 +35,4 @@ cd kolt
 
 ## License
 
-AGPL-3.0 — same as upstream cmux.
+AGPL-3.0 — same as upstream cmux. See [NOTICE](NOTICE) for details.
