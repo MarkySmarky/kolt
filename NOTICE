@@ -1,0 +1,30 @@
+kolt — https://github.com/MarkySmarky/kolt
+
+This software is a fork of cmux (https://github.com/manaflow-ai/cmux),
+copyright (c) 2024-present Manaflow, Inc., licensed under AGPL-3.0-or-later.
+
+Modifications and additions in this fork are copyright (c) 2026-present
+the kolt contributors, and are also licensed under AGPL-3.0-or-later.
+
+The following files were added in this fork:
+
+  Sources/GitWatcher.swift
+  Sources/Panels/DiffPanel.swift
+  Sources/Panels/DiffPanelView.swift
+  Sources/WorktreeManager.swift
+  Sources/WorkspaceCreationSheet.swift
+  web/diff-viewer/
+
+The following files were modified:
+
+  Sources/AppDelegate.swift
+  Sources/ContentView.swift
+  Sources/KeyboardShortcutSettings.swift
+  Sources/Panels/Panel.swift
+  Sources/Panels/PanelContentView.swift
+  Sources/SessionPersistence.swift
+  Sources/TerminalController.swift
+  Sources/Workspace.swift
+  GhosttyTabs.xcodeproj/project.pbxproj
+
+For a complete list of changes, see: git log --oneline main
