@@ -75,6 +75,7 @@ private struct DiffWebViewRepresentable: NSViewRepresentable {
 
         let webView = panel.webView
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(webView)
@@ -108,7 +109,7 @@ private struct DiffWebViewRepresentable: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var onRequestPanelFocus: () -> Void
 
         init(onRequestPanelFocus: @escaping () -> Void) {
@@ -118,7 +119,20 @@ private struct DiffWebViewRepresentable: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             // Page readiness is signaled by the "ready" script message from JS,
             // which routes through DiffPanelScriptMessageHandler to webViewDidFinishLoading().
-            // No additional action needed here.
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            let alert = NSAlert()
+            alert.messageText = message
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: String(localized: "diff.confirm.discard", defaultValue: "Discard"))
+            alert.addButton(withTitle: String(localized: "diff.confirm.cancel", defaultValue: "Cancel"))
+            completionHandler(alert.runModal() == .alertFirstButtonReturn)
         }
     }
 }
