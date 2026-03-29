@@ -9903,6 +9903,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        // Diff panel toggle: Ctrl+Cmd+D
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .toggleDiffPanel)) {
+#if DEBUG
+            dlog("shortcut.action name=toggleDiffPanel \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            if let workspace = tabManager?.selectedWorkspace {
+                // Toggle: close existing DiffPanel or open a new one.
+                let existingDiffPanels = workspace.panels.values.compactMap { $0 as? DiffPanel }
+                if let existingDiff = existingDiffPanels.first {
+                    _ = workspace.closePanel(existingDiff.id)
+                } else if let focusedPanelId = workspace.focusedPanelId {
+                    let cwd = workspace.currentDirectory ?? FileManager.default.currentDirectoryPath
+                    workspace.newDiffSplit(
+                        from: focusedPanelId,
+                        orientation: .vertical,
+                        workingDirectory: cwd
+                    )
+                }
+            }
+            return true
+        }
+
         // Surface navigation (legacy Ctrl+Tab support)
         if matchTabShortcut(event: event, shortcut: StoredShortcut(key: "\t", command: false, shift: false, option: false, control: true)) {
             tabManager?.selectNextSurface()

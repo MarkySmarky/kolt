@@ -84,6 +84,40 @@
         var suffix = currentFiles.length === 1 ? " changed file" : " changed files";
         fileCountEl.textContent = currentFiles.length + suffix;
 
+        // Header row with bulk actions
+        var header = document.createElement("div");
+        header.className = "files-header";
+        var headerTitle = document.createElement("span");
+        headerTitle.className = "files-title";
+        headerTitle.textContent = "Changes";
+        header.appendChild(headerTitle);
+
+        var headerActions = document.createElement("div");
+        headerActions.className = "files-header-actions";
+
+        var stageAllBtn = document.createElement("button");
+        stageAllBtn.className = "action-btn";
+        stageAllBtn.textContent = "Stage All";
+        stageAllBtn.title = "Stage All";
+        stageAllBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            window.stageAll();
+        });
+        headerActions.appendChild(stageAllBtn);
+
+        var revertAllBtn = document.createElement("button");
+        revertAllBtn.className = "action-btn";
+        revertAllBtn.textContent = "Revert All";
+        revertAllBtn.title = "Revert All";
+        revertAllBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            window.revertAll();
+        });
+        headerActions.appendChild(revertAllBtn);
+
+        header.appendChild(headerActions);
+        fileListEl.appendChild(header);
+
         for (var i = 0; i < currentFiles.length; i++) {
             var file = currentFiles[i];
             var item = document.createElement("div");
@@ -130,6 +164,34 @@
                 }
                 item.appendChild(stats);
             }
+
+            // Action buttons (stage/revert per file)
+            var actions = document.createElement("div");
+            actions.className = "file-actions";
+
+            var stageBtn = document.createElement("button");
+            stageBtn.className = "action-btn stage-btn";
+            stageBtn.textContent = "+";
+            stageBtn.title = "Stage";
+            stageBtn.dataset.filePath = file.path;
+            stageBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.stageFile(this.dataset.filePath);
+            });
+            actions.appendChild(stageBtn);
+
+            var revertBtn = document.createElement("button");
+            revertBtn.className = "action-btn revert-btn";
+            revertBtn.textContent = "\u21A9";
+            revertBtn.title = "Revert";
+            revertBtn.dataset.filePath = file.path;
+            revertBtn.addEventListener("click", function (e) {
+                e.stopPropagation();
+                window.revertFile(this.dataset.filePath);
+            });
+            actions.appendChild(revertBtn);
+
+            item.appendChild(actions);
 
             item.addEventListener("click", onFileClick);
             fileListEl.appendChild(item);
@@ -282,7 +344,12 @@
     // --- Unified View ---
 
     function renderUnifiedView(parsedLines) {
-        var html = '<table class="diff-table unified">';
+        var html = '<table class="diff-table unified">' +
+            '<colgroup>' +
+            '<col style="width:48px">' +
+            '<col style="width:48px">' +
+            '<col>' +
+            '</colgroup>';
         for (var i = 0; i < parsedLines.length; i++) {
             var pline = parsedLines[i];
             html += renderUnifiedLine(pline);
@@ -342,7 +409,13 @@
         // Group consecutive add/del lines into change blocks
         var leftLines = [];
         var rightLines = [];
-        var html = '<table class="diff-table side-by-side">';
+        var html = '<table class="diff-table side-by-side">' +
+            '<colgroup>' +
+            '<col style="width:40px">' +
+            '<col style="width:calc(50% - 40px)">' +
+            '<col style="width:40px">' +
+            '<col style="width:calc(50% - 40px)">' +
+            '</colgroup>';
 
         var i = 0;
         while (i < parsedLines.length) {
@@ -460,6 +533,42 @@
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;");
     }
+
+    // --- Git Actions ---
+
+    window.stageFile = function (path) {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+            window.webkit.messageHandlers.diffPanel.postMessage({ action: "stageFile", path: path });
+        }
+    };
+
+    window.unstageFile = function (path) {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+            window.webkit.messageHandlers.diffPanel.postMessage({ action: "unstageFile", path: path });
+        }
+    };
+
+    window.revertFile = function (path) {
+        if (confirm("Revert changes to " + path + "?")) {
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+                window.webkit.messageHandlers.diffPanel.postMessage({ action: "revertFile", path: path });
+            }
+        }
+    };
+
+    window.stageAll = function () {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+            window.webkit.messageHandlers.diffPanel.postMessage({ action: "stageAll" });
+        }
+    };
+
+    window.revertAll = function () {
+        if (confirm("Revert ALL changes?")) {
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
+                window.webkit.messageHandlers.diffPanel.postMessage({ action: "revertAll" });
+            }
+        }
+    };
 
     // Notify Swift that the page is ready
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.diffPanel) {
