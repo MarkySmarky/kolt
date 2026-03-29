@@ -165,6 +165,15 @@ jobs:
             sleep $((attempt * 5))
           done
 
+      - name: Build test host app
+        run: |
+          set -euo pipefail
+          SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
+          xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Debug \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -destination "platform=macOS" build
+
       - name: Run unit tests
         run: |
           set -euo pipefail
